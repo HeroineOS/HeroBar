@@ -5,6 +5,7 @@
 
 mod config;
 mod modules;
+mod reload;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use modules::Module;
 
 struct Bar {
     config: config::Config,
+    watch: reload::Watch,
     modules: Vec<Module>,
     /// Module indexes per section.
     left: Vec<usize>,
@@ -39,10 +41,12 @@ enum Msg {
     /// Module `i` was clicked.
     Click(usize),
     Launched,
+    /// Once a second: did the config or the theme change?
+    CheckReload,
 }
 
 impl Bar {
-    fn new(config: config::Config) -> Bar {
+    fn new(config: config::Config, watch: reload::Watch) -> Bar {
         let mut modules = Vec::new();
         let mut section = |names: &[String]| {
             names
@@ -56,7 +60,7 @@ impl Bar {
         let left = section(&config.bar.modules_left);
         let center = section(&config.bar.modules_center);
         let right = section(&config.bar.modules_right);
-        Bar { config, modules, left, center, right }
+        Bar { config, watch, modules, left, center, right }
     }
 }
 
@@ -82,6 +86,22 @@ impl App for Bar {
                 }
             }
             Msg::Launched => {}
+            Msg::CheckReload => {
+                if self.watch.changed() {
+                    // Don't trade a working bar for a broken config.
+                    let broken = self.watch.config.as_ref().and_then(|p| {
+                        let text = std::fs::read_to_string(p).ok()?;
+                        config::parse(&text).err().map(|e| format!("{}: {e}", p.display()))
+                    });
+                    match broken {
+                        Some(e) => eprintln!("herobar: not reloading, the config has errors:\n{e}"),
+                        None => {
+                            let e = reload::restart();
+                            eprintln!("herobar: reload failed: {e}");
+                        }
+                    }
+                }
+            }
         }
         Task::none()
     }
@@ -123,6 +143,7 @@ impl App for Bar {
             .enumerate()
             .filter(|(_, m)| m.is_dynamic())
             .map(|(i, m)| Subscription::every(Duration::from_secs_f64(m.interval), Msg::Tick(i)))
+            .chain([Subscription::every(Duration::from_secs(1), Msg::CheckReload)])
             .collect()
     }
 
@@ -318,6 +339,7 @@ fn main() {
     }
 
     modules::init_time();
+    let watch = reload::Watch::new(path.clone().or_else(config::default_path));
     let config = config::load(path);
     let edge = match config.bar.position {
         config::Position::Top => Edge::Top,
@@ -326,7 +348,7 @@ fn main() {
     let height = config.bar.height.max(1);
     let mut settings = Settings::panel("herobar", edge, height).class("herobar");
     settings.reserve = Some((edge, if config.bar.reserve_space { height } else { 0 }));
-    if let Err(e) = heroui::run(Bar::new(config), settings) {
+    if let Err(e) = heroui::run(Bar::new(config, watch), settings) {
         eprintln!("herobar: {e}");
         std::process::exit(1);
     }

@@ -22,8 +22,9 @@ sudo apt install ./herobar_0.1.2-1_arm64.deb
 herobar &
 ```
 
-Start it from your compositor's autostart (e.g. `exec herobar` in sway). It reads
-`~/.config/hero/bar.toml` when it starts; restart it to apply changes.
+Start it from your compositor's autostart (e.g. `exec herobar` in sway). It applies
+changes to `~/.config/hero/bar.toml` and the HeroUI theme within a second (it reloads
+itself; a config with errors is reported and ignored until fixed). Appearance edits both.
 
 ## Modules
 
@@ -75,8 +76,8 @@ on-click = { action = "run-command", arg = "hero-settings" }   # or on-click = "
 
 Colors and fonts default to the shared HeroUI theme (`~/.config/heroui/theme.conf`), so
 the bar matches other HeroUI programs. Unknown keys and module names are errors, reported
-with their line; the bar then falls back to the default config instead of not starting.
-Restart the bar to apply changes.
+with their line; at startup the bar then falls back to the default config instead of not
+starting, and while running it keeps the last good config.
 
 ## Building
 
