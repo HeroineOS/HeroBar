@@ -1,0 +1,23 @@
+[package]
+name = "hero-bar"
+version = "0.1.0"
+description = "A lightweight status bar for Wayland (and X11), built on HeroUI"
+repository = "https://github.com/HeroineOS/Hero-Bar"
+license = "MIT OR Apache-2.0"
+edition = "2021"
+
+[dependencies]
+heroui = { git = "https://github.com/HeroineOS/HeroUI", features = ["layer-shell"] }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+
+# Native Wayland panels need wlr-layer-shell, which upstream fltk-sys lacks.
+# The HeroineOS fork is fltk-sys 1.5.23 plus layer-shell (same API).
+[patch.crates-io]
+fltk-sys = { git = "https://github.com/HeroineOS/fltk-sys" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

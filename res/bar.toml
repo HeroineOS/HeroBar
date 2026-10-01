@@ -1,0 +1,89 @@
+# Default configuration for hero-bar.
+#
+# This is a good starter configuration. Copy it to ~/.config/hero/bar.toml and build
+# yours on top of it:
+#   hero-bar --print-default-config > ~/.config/hero/bar.toml
+# ---
+# Colors and fonts come from the shared HeroUI theme (~/.config/heroui/theme.conf),
+# so the bar matches every other HeroUI program. Override them in [style] below.
+
+# ---------------------------------------------------------
+
+# The bar itself.
+[bar]
+position = "top"       # "top" or "bottom"
+height = 34
+reserve-space = true   # Keep maximized/tiled windows from covering the bar
+padding = 6            # Space between the screen edges and the outer modules
+spacing = 4            # Space between modules
+
+# Modules, from the screen edge inwards for left/right. Each name refers to a
+# [modules.<name>] section below. Built-in kinds: clock, cpu, memory, battery,
+# network. "custom/<anything>" runs a command or shows fixed text.
+modules-left = ["custom/menu", "custom/terminal"]
+modules-center = ["clock"]
+modules-right = ["custom/volume", "network", "cpu", "memory", "battery"]
+
+# ---------------------------------------------------------
+
+# Theme overrides for the bar only. Leave a key out to use the HeroUI theme.
+# Colors: "#rgb", "#rrggbb" or "#rrggbbaa" (alpha is ignored).
+[style]
+# background = "#14141c"
+# foreground = "#e6e6f0"
+# hover = "#2a2a3a"      # Background of a module under the mouse, if it's clickable
+# font = "Inter"
+# font-size = 14
+
+# ---------------------------------------------------------
+
+# Modules.
+#
+# Every module accepts:
+#   interval = 2               # Seconds between updates
+#   on-click = "command"       # Shorthand for the table form below
+#   on-click = { action = "run-command", arg = "command" }
+#
+# Commands run through "sh -c", like the compositor's run-command action.
+
+# Placeholders follow strftime: man 3 strftime
+[modules.clock]
+format = "%a %d %b  %H:%M"
+interval = 1
+
+# {usage}: busy CPU time since the last update, in percent
+[modules.cpu]
+format = "CPU {usage}%"
+interval = 2
+
+# {used} {total} (GiB) {percent}
+[modules.memory]
+format = "RAM {used} GiB"
+interval = 5
+
+# {capacity} (percent), {status}: Charging, Discharging, Full...
+# Hidden on machines without a battery.
+[modules.battery]
+format = "BAT {capacity}%"
+interval = 30
+
+# Shows the interface the default route goes through.
+# {ifname} {state}: up, down, dormant...
+[modules.network]
+format = "{ifname}"
+format-disconnected = "offline"
+interval = 5
+
+# Custom modules show fixed text, or the first line a command prints.
+[modules."custom/menu"]
+text = "HeroineOS"
+on-click = { action = "run-command", arg = "hero-settings" }
+
+[modules."custom/terminal"]
+text = "Terminal"
+on-click = "foot"
+
+[modules."custom/volume"]
+exec = "wpctl get-volume @DEFAULT_AUDIO_SINK@ | awk '{ printf \"VOL %d%%\", $2 * 100 }'"
+interval = 5
+on-click = "pavucontrol"
