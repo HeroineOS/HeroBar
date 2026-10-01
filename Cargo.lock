@@ -91,7 +91,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "herobar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "heroui",
  "serde",
@@ -101,7 +101,7 @@ dependencies = [
 [[package]]
 name = "heroui"
 version = "0.1.0"
-source = "git+https://github.com/HeroineOS/HeroUI#3544bfabfeac0bf1b370e381d668b665df9349c8"
+source = "git+https://github.com/HeroineOS/HeroUI#5f8d1ab059d9333fd4842809d26f140f7911dc7b"
 dependencies = [
  "fltk",
  "fltk-sys",

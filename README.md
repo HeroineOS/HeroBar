@@ -18,7 +18,7 @@ Debian packages for amd64 and arm64 are attached to the
 also install on testing):
 
 ```sh
-sudo apt install ./herobar_0.1.0-1_arm64.deb
+sudo apt install ./herobar_0.1.1-1_arm64.deb
 herobar &
 ```
 
