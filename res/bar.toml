@@ -83,7 +83,12 @@ on-click = { action = "run-command", arg = "hero-settings" }
 text = "Terminal"
 on-click = "foot"
 
+# Volume through PipeWire (wpctl, from the wireplumber package), or PulseAudio
+# / pipewire-pulse (pactl). Hidden if neither prints anything.
 [modules."custom/volume"]
-exec = "wpctl get-volume @DEFAULT_AUDIO_SINK@ | awk '{ printf \"VOL %d%%\", $2 * 100 }'"
+exec = """
+wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '{ printf "VOL %d%%", $2 * 100 }' | grep . ||
+pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | awk '/Volume/ { print "VOL " $5; exit }'
+"""
 interval = 5
 on-click = "pavucontrol"

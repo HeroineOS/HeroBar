@@ -216,7 +216,10 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
         let last_width = Cell::new(-1);
         ctx.bind(move |bar: &Bar| {
             let new = &bar.modules[i].text;
-            if *text.borrow() == *new {
+            // The first run always sizes the module (last_width starts at
+            // -1), so one with no text yet takes no space instead of a
+            // share of the bar.
+            if *text.borrow() == *new && last_width.get() >= 0 {
                 return;
             }
             text.borrow_mut().clone_from(new);
