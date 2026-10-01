@@ -1,4 +1,4 @@
-//! hero-bar: a lightweight status bar built on HeroUI.
+//! herobar: a lightweight status bar built on HeroUI.
 //!
 //! A layer-shell panel on Wayland compositors that support it (HeroWM,
 //! sway, Hyprland, KDE...), a dock window with a strut on X11.
@@ -261,7 +261,7 @@ fn resize_module(w: &mut heroui::fltk::widget::Widget, width: i32, section: Sect
 }
 
 fn usage() -> &'static str {
-    "Usage: hero-bar [--config FILE] [--check] [--print-default-config]
+    "Usage: herobar [--config FILE] [--check] [--print-default-config]
 
   --config FILE           Use FILE instead of ~/.config/hero/bar.toml
   --check                 Validate the config and exit (status 1 if invalid)
@@ -278,7 +278,7 @@ fn main() {
             "--config" | "-c" => match args.next() {
                 Some(p) => path = Some(p.into()),
                 None => {
-                    eprintln!("hero-bar: --config needs a file\n\n{}", usage());
+                    eprintln!("herobar: --config needs a file\n\n{}", usage());
                     std::process::exit(2);
                 }
             },
@@ -288,7 +288,7 @@ fn main() {
                 return;
             }
             "--version" | "-V" => {
-                println!("hero-bar {}", env!("CARGO_PKG_VERSION"));
+                println!("herobar {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             "--help" | "-h" => {
@@ -296,7 +296,7 @@ fn main() {
                 return;
             }
             other => {
-                eprintln!("hero-bar: unknown argument '{other}'\n\n{}", usage());
+                eprintln!("herobar: unknown argument '{other}'\n\n{}", usage());
                 std::process::exit(2);
             }
         }
@@ -321,10 +321,10 @@ fn main() {
         config::Position::Bottom => Edge::Bottom,
     };
     let height = config.bar.height.max(1);
-    let mut settings = Settings::panel("hero-bar", edge, height).class("hero-bar");
+    let mut settings = Settings::panel("herobar", edge, height).class("herobar");
     settings.reserve = Some((edge, if config.bar.reserve_space { height } else { 0 }));
     if let Err(e) = heroui::run(Bar::new(config), settings) {
-        eprintln!("hero-bar: {e}");
+        eprintln!("herobar: {e}");
         std::process::exit(1);
     }
 }

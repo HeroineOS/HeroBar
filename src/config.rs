@@ -144,10 +144,10 @@ pub fn load(path: Option<PathBuf>) -> Config {
         match std::fs::read_to_string(p) {
             Ok(text) => match parse(&text) {
                 Ok(c) => return c,
-                Err(e) => eprintln!("hero-bar: {}: {e}\nhero-bar: using the default config", p.display()),
+                Err(e) => eprintln!("herobar: {}: {e}\nherobar: using the default config", p.display()),
             },
             Err(e) if explicit || e.kind() != std::io::ErrorKind::NotFound => {
-                eprintln!("hero-bar: {}: {e}\nhero-bar: using the default config", p.display())
+                eprintln!("herobar: {}: {e}\nherobar: using the default config", p.display())
             }
             Err(_) => {}
         }

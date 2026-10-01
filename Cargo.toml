@@ -1,8 +1,8 @@
 [package]
-name = "hero-bar"
+name = "herobar"
 version = "0.1.0"
 description = "A lightweight status bar for Wayland (and X11), built on HeroUI"
-repository = "https://github.com/HeroineOS/Hero-Bar"
+repository = "https://github.com/HeroineOS/HeroBar"
 license = "MIT OR Apache-2.0"
 edition = "2021"
 
@@ -21,3 +21,20 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[package.metadata.deb]
+maintainer = "HeroineOS <https://github.com/HeroineOS>"
+copyright = "HeroineOS contributors"
+section = "x11"
+priority = "optional"
+depends = "$auto"
+extended-description = """\
+A lightweight status bar built on HeroUI. A native panel (wlr-layer-shell) on \
+Wayland compositors that support it, a dock window on X11. Configured in \
+~/.config/hero/bar.toml; run `herobar --print-default-config` for a commented \
+starting point."""
+assets = [
+    ["target/release/herobar", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/herobar/README.md", "644"],
+    ["res/bar.toml", "usr/share/doc/herobar/examples/bar.toml", "644"],
+]

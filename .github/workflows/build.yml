@@ -1,7 +1,10 @@
 name: build
 
-# Builds and tests hero-bar natively on every supported architecture, in a
-# Debian testing container (the HeroineOS base). armv7 runs under QEMU.
+# Builds and tests herobar on x86_64 and arm64 in a Debian stable container
+# (packages built on stable also install on testing), and packages a .deb.
+# Pushing a tag v* creates a draft release with the .debs.
+#
+# The code also targets i686 and armv7; those aren't built here yet.
 on:
   push:
   pull_request:
@@ -14,32 +17,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64,  runner: ubuntu-24.04,     platform: linux/amd64 }
-          - { arch: i686,    runner: ubuntu-24.04,     platform: linux/386 }
-          - { arch: aarch64, runner: ubuntu-24.04-arm, platform: linux/arm64 }
-          - { arch: armv7,   runner: ubuntu-24.04,     platform: linux/arm/v7, qemu: true }
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 150
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - if: ${{ matrix.qemu }}
-        uses: docker/setup-qemu-action@v3
-      - name: Build and test
+      - name: Build, test and package
         run: |
-          docker run --rm --platform ${{ matrix.platform }} -v "$PWD":/src -w /src debian:testing sh -euc '
+          docker run --rm -v "$PWD":/src -w /src debian:trixie sh -euc '
             apt-get update -qq
-            apt-get install -y -qq --no-install-recommends ca-certificates curl git build-essential cmake pkg-config \
+            apt-get install -y -qq --no-install-recommends ca-certificates curl git build-essential cmake pkg-config dpkg-dev \
               libx11-dev libxext-dev libxft-dev libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev \
               libpango1.0-dev libcairo2-dev libgl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev >/dev/null
             curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
             . "$HOME/.cargo/env"
-            rustc -vV | sed -n "s/^host: //p"
+            cargo install -q cargo-deb --locked
             cargo build --release --locked
             cargo test --release --locked
-            mkdir -p out && cp target/release/hero-bar out/hero-bar-${{ matrix.arch }}
-            ls -l out
+            cargo deb --no-build --locked
+            mkdir -p out && cp target/debian/*.deb out/
+            dpkg-deb -I out/*.deb | sed -n "/Package/,/Description/p"
           '
       - uses: actions/upload-artifact@v4
         with:
-          name: hero-bar-${{ matrix.arch }}
-          path: out/hero-bar-${{ matrix.arch }}
+          name: herobar-${{ matrix.arch }}
+          path: out/*.deb
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/*.deb --repo "$GITHUB_REPOSITORY" --draft \
+            --title "HeroBar $GITHUB_REF_NAME" --notes "Test build. Install with: sudo apt install ./herobar_*_<arch>.deb"

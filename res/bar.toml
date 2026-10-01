@@ -1,8 +1,8 @@
-# Default configuration for hero-bar.
+# Default configuration for herobar.
 #
 # This is a good starter configuration. Copy it to ~/.config/hero/bar.toml and build
 # yours on top of it:
-#   hero-bar --print-default-config > ~/.config/hero/bar.toml
+#   herobar --print-default-config > ~/.config/hero/bar.toml
 # ---
 # Colors and fonts come from the shared HeroUI theme (~/.config/heroui/theme.conf),
 # so the bar matches every other HeroUI program. Override them in [style] below.

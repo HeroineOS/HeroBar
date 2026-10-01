@@ -1,4 +1,4 @@
-# Hero-Bar
+# HeroBar
 
 A lightweight status bar for Wayland and X11, part of [HeroineOS](https://github.com/HeroineOS)
 and built on [HeroUI](https://github.com/HeroineOS/HeroUI). It's a standalone program:
@@ -10,6 +10,20 @@ use it with HeroWM, or in your own sway/Hyprland/KDE rice.
 - **Light:** 2.4 MB of its own memory (about 16 MB RSS with shared libraries), 0% CPU
   with a clock ticking every second, 1.6 MB binary. Measured on Wayland (sway).
 - **Configured in TOML**, in the same style as the HeroWM compositor's config.
+
+## Install
+
+Debian packages for amd64 and arm64 are attached to the
+[releases](https://github.com/HeroineOS/HeroBar/releases) (built on Debian stable; they
+also install on testing):
+
+```sh
+sudo apt install ./herobar_0.1.0-1_arm64.deb
+herobar &
+```
+
+Start it from your compositor's autostart (e.g. `exec herobar` in sway). It reads
+`~/.config/hero/bar.toml` when it starts; restart it to apply changes.
 
 ## Modules
 
@@ -32,8 +46,8 @@ built-in default is used. Start from it:
 
 ```sh
 mkdir -p ~/.config/hero
-hero-bar --print-default-config > ~/.config/hero/bar.toml
-hero-bar --check     # validate after editing
+herobar --print-default-config > ~/.config/hero/bar.toml
+herobar --check     # validate after editing
 ```
 
 The default config ([`res/bar.toml`](res/bar.toml)) is commented and shows every option.
@@ -67,7 +81,8 @@ Restart the bar to apply changes.
 ## Building
 
 ```sh
-cargo build --release      # target/release/hero-bar
+cargo build --release      # target/release/herobar
+cargo deb                  # target/debian/herobar_*.deb (cargo install cargo-deb)
 ```
 
 Needs Rust, CMake, a C++ compiler, and on Debian: `libx11-dev libxext-dev libxft-dev
@@ -77,7 +92,7 @@ libgl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev`.
 Cargo.toml patches `fltk-sys` with [HeroineOS/fltk-sys](https://github.com/HeroineOS/fltk-sys)
 (fltk-sys 1.5.23 plus layer-shell), because upstream FLTK doesn't support layer-shell.
 
-Targets: x86_64, aarch64, i686 and armv7 Linux.
+Targets: x86_64, aarch64, i686 and armv7 Linux (CI builds and tests x86_64 and aarch64).
 
 ## License
 
