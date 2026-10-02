@@ -201,11 +201,12 @@ const PAD: i32 = 10;
 /// A module: its text, sized to fit; clickable if it has an on-click action.
 fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let t = ctx.theme_rc();
         let text: Rc<RefCell<String>> = Rc::default();
         let paint = {
-            let (t, text) = (t.clone(), text.clone());
+            let text = text.clone();
             move |w: &mut dyn WidgetExt, hovered: bool| {
+                // The theme in use now: it changes live (Appearance).
+                let t = heroui::theme::current();
                 if hovered {
                     draw::set_draw_color(t.surface_alt);
                     let h = w.h() - 6;
@@ -233,7 +234,6 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
             f.as_base_widget()
         };
         let mut w = widget.clone();
-        let font = (t.font(), t.font_size);
         let last_width = Cell::new(-1);
         ctx.bind(move |bar: &Bar| {
             let new = &bar.modules[i].text;
@@ -244,7 +244,8 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
                 return;
             }
             text.borrow_mut().clone_from(new);
-            draw::set_font(font.0, font.1);
+            let t = heroui::theme::current();
+            draw::set_font(t.font(), t.font_size);
             let width = if new.is_empty() { 0 } else { draw::width(new).ceil() as i32 + 2 * PAD };
             if width != last_width.replace(width) {
                 resize_module(&mut w, width, section, i, &widths);

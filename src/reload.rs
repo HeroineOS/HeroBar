@@ -1,6 +1,7 @@
-//! Live reload: the bar applies changes to its config or the HeroUI theme
-//! (from Appearance or a text editor) by re-executing itself. It checks the
-//! files' modification times once a second: two stat() calls.
+//! Live reload: the bar applies changes to its config (from Appearance or
+//! a text editor) by re-executing itself. It checks the file's
+//! modification time once a second: one stat() call. Theme changes need no
+//! restart: HeroUI follows the theme file itself and re-skins the bar.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -16,7 +17,7 @@ fn mtime(p: &PathBuf) -> Option<SystemTime> {
 
 impl Watch {
     pub fn new(config: Option<PathBuf>) -> Watch {
-        let files = config.iter().cloned().chain(heroui::Theme::path()).map(|p| {
+        let files = config.iter().cloned().map(|p| {
             let t = mtime(&p);
             (p, t)
         });
