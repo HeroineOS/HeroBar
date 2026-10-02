@@ -10,6 +10,12 @@ use it with HeroWM, or in your own sway/Hyprland/KDE rice.
 - **Light:** 2.4 MB of its own memory (about 16 MB RSS with shared libraries), 0% CPU
   with a clock ticking every second, 1.6 MB binary. Measured on Wayland (sway).
 - **Configured in TOML**, in the same style as the HeroWM compositor's config.
+- **Taskbar** with pinned apps and open windows: from HeroWM's IPC, or the
+  wlr-foreign-toplevel-management protocol (sway, Hyprland, labwc, river, Wayfire).
+- **Icons** that follow the theme (battery level, Wi-Fi/wired, volume...), app icons
+  from your icon theme.
+- **Islands** (optional): each module on its own background, sharp, rounded or pill,
+  with see-through gaps (Wayland).
 
 ## Install
 
@@ -18,7 +24,7 @@ Debian packages for amd64 and arm64 are attached to the
 also install on testing):
 
 ```sh
-sudo apt install ./herobar_0.1.4-1_arm64.deb
+sudo apt install ./herobar_0.1.5-1_arm64.deb
 herobar &
 ```
 
@@ -35,10 +41,26 @@ itself; a config with errors is reported and ignored until fixed). Appearance ed
 | `memory` | RAM in use | `{used}` `{total}` (GiB), `{percent}` |
 | `battery` | battery level (hidden without a battery) | `{capacity}` `{status}` |
 | `network` | interface of the default route | `{ifname}` `{state}` |
+| `volume` | default output volume, via wpctl or pactl (hidden without audio) | `{volume}` |
+| `taskbar` | pinned apps and open windows | (see below) |
 | `custom/<name>` | fixed `text`, or the first line `exec` prints | |
 
-Any module can have `interval = <seconds>` and `on-click`. A module with no text (a
-missing battery, a command that printed nothing) takes no space.
+Any module can have `interval = <seconds>`, `on-click` and `icon` (a built-in icon, an
+icon theme name or an image path; `""` for none). Built-in modules have icons by
+default; battery, network and volume change theirs with their state. A built-in module
+with nothing to show (no battery, no audio) takes no space.
+
+The taskbar shows pinned apps and open windows. Click to open or focus an app (again
+to cycle through its windows), middle click to close a window.
+
+```toml
+[modules.taskbar]
+show = "both"            # "running", "pinned" or "both"
+style = "icons"          # one button per app; "icons-titles": one per window, with titles
+pinned = ["foot", "firefox-esr"]   # .desktop file names
+max-width = 600          # the most room it takes; buttons shrink to fit
+fixed-width = false      # true: always max-width, so other modules never move
+```
 
 ## Configuration
 
@@ -70,9 +92,14 @@ background = "#14141c"
 format = "%a %d %b  %H:%M"
 
 [modules."custom/menu"]
+icon = "apps"
 text = "HeroineOS"
-on-click = { action = "run-command", arg = "hero-settings" }   # or on-click = "hero-settings"
+on-click = { action = "run-command", arg = "heroappearance" }   # or on-click = "heroappearance"
 ```
+
+Islands: `islands = true` and `island-style = "sharp" | "rounded" | "pill"` in `[bar]`.
+The gaps are see-through on Wayland (through the fltk-sys fork); on X11 the islands sit
+on the bar.
 
 Colors and fonts default to the shared HeroUI theme (`~/.config/heroui/theme.conf`), so
 the bar matches other HeroUI programs. Unknown keys and module names are errors, reported
@@ -91,7 +118,8 @@ libxinerama-dev libxcursor-dev libxrender-dev libxfixes-dev libpango1.0-dev libc
 libgl-dev libwayland-dev wayland-protocols libxkbcommon-dev libdbus-1-dev`.
 
 Cargo.toml patches `fltk-sys` with [HeroineOS/fltk-sys](https://github.com/HeroineOS/fltk-sys)
-(fltk-sys 1.5.23 plus layer-shell), because upstream FLTK doesn't support layer-shell.
+(fltk-sys 1.5.23 plus layer-shell, touch and transparent windows), because upstream FLTK
+supports none of them on Wayland.
 
 Targets: x86_64, aarch64, i686 and armv7 Linux (CI builds and tests x86_64 and aarch64).
 

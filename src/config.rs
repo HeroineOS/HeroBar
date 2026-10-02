@@ -32,6 +32,9 @@ pub struct Bar {
     pub modules_left: Vec<String>,
     pub modules_center: Vec<String>,
     pub modules_right: Vec<String>,
+    /// Each module on its own background, with see-through gaps between.
+    pub islands: bool,
+    pub island_style: IslandStyle,
 }
 
 impl Default for Bar {
@@ -45,6 +48,8 @@ impl Default for Bar {
             modules_left: Vec::new(),
             modules_center: Vec::new(),
             modules_right: Vec::new(),
+            islands: false,
+            island_style: IslandStyle::Rounded,
         }
     }
 }
@@ -55,6 +60,15 @@ pub enum Position {
     #[default]
     Top,
     Bottom,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IslandStyle {
+    Sharp,
+    #[default]
+    Rounded,
+    Pill,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -82,6 +96,38 @@ pub struct Module {
     pub exec: Option<String>,
     /// battery: e.g. "BAT1" (default: the first one found)
     pub name: Option<String>,
+    /// Icon before the text: a built-in icon, a theme icon name or an
+    /// image path; "" for none. Built-in kinds pick one by default.
+    pub icon: Option<String>,
+    /// taskbar: "running", "pinned" or "both"
+    pub show: Option<TaskShow>,
+    /// taskbar: "icons" (one button per app) or "icons-titles" (one per window)
+    pub style: Option<TaskStyle>,
+    /// taskbar: apps to always show, as .desktop file names ("foot", "firefox-esr")
+    pub pinned: Option<Vec<String>>,
+    /// taskbar: the most room it takes, in pixels; buttons shrink to fit
+    pub max_width: Option<i32>,
+    /// taskbar: always take max-width, so other modules never move
+    pub fixed_width: Option<bool>,
+    /// taskbar, icons-titles: the widest a window button gets
+    pub button_width: Option<i32>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskShow {
+    Running,
+    Pinned,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskStyle {
+    #[default]
+    Icons,
+    IconsTitles,
 }
 
 /// A string is shorthand for `{ action = "run-command", arg = "..." }`.
@@ -122,7 +168,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
     let config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
     for name in config.bar.modules_left.iter().chain(&config.bar.modules_center).chain(&config.bar.modules_right) {
         if crate::modules::Kind::from_name(name).is_none() {
-            return Err(format!("unknown module kind '{name}' (built-in: clock, cpu, memory, battery, network, custom/<name>)"));
+            return Err(format!("unknown module kind '{name}' (built-in: clock, cpu, memory, battery, network, volume, taskbar, custom/<name>)"));
         }
     }
     for (name, m) in &config.modules {
@@ -174,8 +220,9 @@ mod tests {
     fn default_config_parses() {
         let c = parse(DEFAULT).unwrap();
         assert_eq!(c.bar.modules_center, ["clock"]);
-        assert_eq!(c.modules["custom/terminal"].on_click.as_ref().unwrap().command(), Some("foot"));
-        assert_eq!(c.modules["custom/menu"].on_click.as_ref().unwrap().command(), Some("hero-settings"));
+        assert_eq!(c.modules["taskbar"].pinned.as_deref().unwrap_or_default().first().map(String::as_str), Some("foot"));
+        assert_eq!(c.bar.island_style, IslandStyle::Rounded);
+        assert_eq!(c.modules["custom/menu"].on_click.as_ref().unwrap().command(), Some("heroappearance"));
     }
 
     #[test]

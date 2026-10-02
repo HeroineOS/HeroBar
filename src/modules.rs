@@ -13,6 +13,8 @@ pub enum Kind {
     Memory,
     Battery,
     Network,
+    Volume,
+    Taskbar,
     Custom,
 }
 
@@ -24,6 +26,8 @@ impl Kind {
             "memory" => Kind::Memory,
             "battery" => Kind::Battery,
             "network" => Kind::Network,
+            "volume" => Kind::Volume,
+            "taskbar" => Kind::Taskbar,
             n if n.starts_with("custom/") && n.len() > 7 => Kind::Custom,
             _ => return None,
         })
@@ -33,28 +37,53 @@ impl Kind {
         match self {
             Kind::Clock => 1.0,
             Kind::Cpu => 2.0,
-            Kind::Memory | Kind::Network => 5.0,
+            Kind::Memory | Kind::Network | Kind::Volume => 5.0,
             Kind::Battery => 30.0,
-            Kind::Custom => 10.0,
+            Kind::Custom | Kind::Taskbar => 10.0,
         }
     }
 
     fn default_format(self) -> &'static str {
         match self {
             Kind::Clock => "%H:%M",
-            Kind::Cpu => "CPU {usage}%",
-            Kind::Memory => "RAM {used} GiB",
-            Kind::Battery => "BAT {capacity}%",
+            Kind::Cpu => "{usage}%",
+            Kind::Memory => "{used}/{total} GiB",
+            Kind::Battery => "{capacity}%",
             Kind::Network => "{ifname}",
-            Kind::Custom => "",
+            Kind::Volume => "{volume}%",
+            Kind::Custom | Kind::Taskbar => "",
+        }
+    }
+
+    /// The icon shown when the config doesn't name one (dynamic kinds
+    /// update it in `refresh`).
+    fn default_icon(self) -> &'static str {
+        match self {
+            Kind::Cpu => "cpu",
+            Kind::Memory => "memory",
+            Kind::Battery => "battery",
+            Kind::Network => "network-wired",
+            Kind::Volume => "volume-high",
+            Kind::Clock | Kind::Custom | Kind::Taskbar => "",
         }
     }
 }
+
+/// Prints "<percent> <muted 0|1>" for the default output, through
+/// PipeWire (wpctl) or PulseAudio/pipewire-pulse (pactl); nothing if
+/// neither works.
+pub const VOLUME_CMD: &str = r#"v=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null) && { echo "$v" | awk '{ printf "%d %d\n", $2 * 100 + 0.5, /MUTED/ }'; exit; }
+p=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | awk '/Volume/ { gsub("%", "", $5); print $5; exit }')
+[ -n "$p" ] && echo "$p $(pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null | grep -c yes)""#;
 
 /// A module's state; `text` is what the bar shows ("" hides the module).
 pub struct Module {
     pub kind: Kind,
     pub text: String,
+    /// Icon shown before the text ("" = none).
+    pub icon: String,
+    /// The config's `icon`; None picks the kind's (possibly dynamic) icon.
+    icon_cfg: Option<String>,
     pub command: Option<String>,
     pub interval: f64,
     format: String,
@@ -62,6 +91,8 @@ pub struct Module {
     fixed_text: Option<String>,
     pub exec: Option<String>,
     battery: Option<String>,
+    /// taskbar settings (the windows themselves are in `Bar::taskbar`)
+    pub taskbar: Option<crate::taskbar::Config>,
     /// cpu: last (busy, total) jiffies
     last_cpu: (u64, u64),
 }
@@ -71,16 +102,20 @@ impl Module {
         let kind = Kind::from_name(name).expect("validated by config::parse");
         let empty = config::Module::default();
         let cfg = cfg.unwrap_or(&empty);
+        let icon_cfg = cfg.icon.clone();
         let mut m = Module {
             kind,
             text: String::new(),
+            icon: icon_cfg.clone().unwrap_or_else(|| kind.default_icon().to_owned()),
+            icon_cfg,
             command: cfg.on_click.as_ref().and_then(|a| a.command()).map(str::to_owned),
             interval: cfg.interval.unwrap_or(kind.default_interval()).max(0.1),
             format: cfg.format.clone().unwrap_or_else(|| kind.default_format().to_owned()),
             format_disconnected: cfg.format_disconnected.clone().unwrap_or_else(|| "offline".into()),
             fixed_text: cfg.text.clone(),
-            exec: cfg.exec.clone(),
+            exec: if kind == Kind::Volume { Some(cfg.exec.clone().unwrap_or_else(|| VOLUME_CMD.to_owned())) } else { cfg.exec.clone() },
             battery: cfg.name.clone(),
+            taskbar: (kind == Kind::Taskbar).then(|| crate::taskbar::Config::new(Some(cfg))),
             last_cpu: (0, 0),
         };
         if kind == Kind::Battery && m.battery.is_none() {
@@ -98,7 +133,41 @@ impl Module {
 
     /// True if the module changes over time (needs a timer).
     pub fn is_dynamic(&self) -> bool {
-        self.kind != Kind::Custom || self.exec.is_some()
+        match self.kind {
+            Kind::Custom => self.exec.is_some(),
+            // Updated by window events, not a timer.
+            Kind::Taskbar => false,
+            _ => true,
+        }
+    }
+
+    /// Takes the output of `exec` (run on a background thread).
+    pub fn set_output(&mut self, out: String) {
+        if self.kind != Kind::Volume {
+            self.text = out;
+            return;
+        }
+        let mut f = out.split_whitespace();
+        let (Some(Ok(vol)), muted) = (f.next().map(str::parse::<u32>), f.next() == Some("1")) else {
+            // No audio: hide the module.
+            self.text.clear();
+            return;
+        };
+        self.text = fill(&self.format, &[("volume", vol.to_string())]);
+        self.set_icon(if muted || vol == 0 {
+            "volume-muted"
+        } else if vol < 50 {
+            "volume-low"
+        } else {
+            "volume-high"
+        });
+    }
+
+    /// Sets the dynamic icon, unless the config chose one.
+    fn set_icon(&mut self, name: &str) {
+        if self.icon_cfg.is_none() && self.icon != name {
+            self.icon = name.to_owned();
+        }
     }
 
     /// Re-reads the module's source. Custom `exec` modules are refreshed
@@ -141,21 +210,30 @@ impl Module {
                     if capacity.is_empty() {
                         String::new()
                     } else {
-                        fill(&self.format, &[("capacity", capacity), ("status", read("status"))])
+                        let status = read("status");
+                        let level: u32 = capacity.parse().unwrap_or(100);
+                        let charging = status == "Charging";
+                        self.set_icon(&format!("battery-{}{}", (level + 5) / 10 * 10, if charging { "-charging" } else { "" }));
+                        fill(&self.format, &[("capacity", capacity), ("status", status)])
                     }
                 }
                 None => String::new(),
             },
             Kind::Network => match default_route_interface() {
                 Some(ifname) => {
+                    let wireless = std::path::Path::new(&format!("/sys/class/net/{ifname}/wireless")).exists();
+                    self.set_icon(if wireless { "network-wireless" } else { "network-wired" });
                     let state = std::fs::read_to_string(format!("/sys/class/net/{ifname}/operstate"))
                         .map(|s| s.trim().to_owned())
                         .unwrap_or_default();
                     fill(&self.format, &[("ifname", ifname), ("state", state)])
                 }
-                None => self.format_disconnected.clone(),
+                None => {
+                    self.set_icon("network-offline");
+                    self.format_disconnected.clone()
+                }
             },
-            Kind::Custom => return,
+            Kind::Custom | Kind::Volume | Kind::Taskbar => return,
         };
         self.text = text;
     }
@@ -307,10 +385,26 @@ mod tests {
     }
 
     #[test]
+    fn volume_output() {
+        let mut m = Module::new("volume", None);
+        m.set_output("40 0".into());
+        assert_eq!((m.text.as_str(), m.icon.as_str()), ("40%", "volume-low"));
+        m.set_output("75 1".into());
+        assert_eq!((m.text.as_str(), m.icon.as_str()), ("75%", "volume-muted"));
+        m.set_output(String::new());
+        assert_eq!(m.text, "");
+        let custom = config::Module { icon: Some(String::new()), ..Default::default() };
+        let mut m = Module::new("volume", Some(&custom));
+        m.set_output("90 0".into());
+        assert_eq!(m.icon, "", "a configured icon (here: none) stays");
+    }
+
+    #[test]
     fn system_readers_work_here() {
         let mut m = Module::new("memory", None);
         m.refresh();
-        assert!(m.text.starts_with("RAM "), "{}", m.text);
+        assert!(m.text.ends_with(" GiB") && m.text.contains('/'), "{}", m.text);
+        assert_eq!(m.icon, "memory");
         assert_eq!(run_exec("echo hi; echo there"), "hi");
     }
 }

@@ -3,9 +3,12 @@
 //! A layer-shell panel on Wayland compositors that support it (HeroWM,
 //! sway, Hyprland, KDE...), a dock window with a strut on X11.
 
+mod apps;
 mod config;
 mod modules;
 mod reload;
+mod taskbar;
+mod windows;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -30,6 +33,8 @@ struct Bar {
     left: Vec<usize>,
     center: Vec<usize>,
     right: Vec<usize>,
+    /// Open windows, for taskbar modules.
+    taskbar: taskbar::Taskbar,
 }
 
 #[derive(Clone)]
@@ -43,6 +48,10 @@ enum Msg {
     Launched,
     /// Once a second: did the config or the theme change?
     CheckReload,
+    /// News from the compositor about windows.
+    Windows(windows::Update),
+    /// A taskbar button was clicked (with mouse button 1-3).
+    Task(taskbar::Item, i32),
 }
 
 impl Bar {
@@ -60,7 +69,7 @@ impl Bar {
         let left = section(&config.bar.modules_left);
         let center = section(&config.bar.modules_center);
         let right = section(&config.bar.modules_right);
-        Bar { config, watch, modules, left, center, right }
+        Bar { config, watch, modules, left, center, right, taskbar: taskbar::Taskbar::default() }
     }
 }
 
@@ -76,7 +85,7 @@ impl App for Bar {
                 }
                 m.refresh();
             }
-            Msg::Output(i, text) => self.modules[i].text = text,
+            Msg::Output(i, out) => self.modules[i].set_output(out),
             Msg::Click(i) => {
                 if let Some(cmd) = self.modules[i].command.clone() {
                     return Task::perform(move || {
@@ -86,6 +95,16 @@ impl App for Bar {
                 }
             }
             Msg::Launched => {}
+            Msg::Windows(windows::Update::Ready(c)) => self.taskbar.control = Some(c),
+            Msg::Windows(windows::Update::Windows(w)) => self.taskbar.windows = w,
+            Msg::Task(item, button) => {
+                if let Some(cmd) = taskbar::click(&item, button, &self.taskbar.windows, self.taskbar.control.as_ref()) {
+                    return Task::perform(move || {
+                        modules::launch(&cmd);
+                        Msg::Launched
+                    });
+                }
+            }
             Msg::CheckReload => {
                 if self.watch.changed() {
                     // Don't trade a working bar for a broken config.
@@ -110,7 +129,12 @@ impl App for Bar {
         let widths = Sections::default();
         let section = |which: Section, idx: &[usize]| {
             let mut items: Vec<Element<Bar, Msg>> =
-                idx.iter().map(|&i| module_view(i, self.modules[i].command.is_some(), which, widths.clone())).collect();
+                idx.iter()
+                .map(|&i| match self.modules[i].kind {
+                    modules::Kind::Taskbar => taskbar::view(i, which, widths.clone()),
+                    _ => module_view(i, self.modules[i].command.is_some(), which, widths.clone()),
+                })
+                .collect();
             // Left items pack to the left, right items to the right.
             match which {
                 Section::Left => items.push(spacer()),
@@ -144,6 +168,9 @@ impl App for Bar {
             .filter(|(_, m)| m.is_dynamic())
             .map(|(i, m)| Subscription::every(Duration::from_secs_f64(m.interval), Msg::Tick(i)))
             .chain([Subscription::every(Duration::from_secs(1), Msg::CheckReload)])
+            .chain(self.modules.iter().any(|m| m.kind == modules::Kind::Taskbar).then(|| {
+                Subscription::worker(|tx: heroui::Sender<Msg>| windows::run(move |u| tx.send(Msg::Windows(u))))
+            }))
             .collect()
     }
 
@@ -171,7 +198,7 @@ impl App for Bar {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Section {
+pub enum Section {
     Left,
     Center,
     Right,
@@ -180,7 +207,7 @@ enum Section {
 /// Measured widths of the center section's modules, to keep the center
 /// section exactly as wide as its content (and so truly centered).
 #[derive(Clone, Default)]
-struct Sections {
+pub struct Sections {
     center: Rc<RefCell<Vec<(usize, i32)>>>,
 }
 
@@ -197,24 +224,89 @@ fn with_margins(el: Element<Bar, Msg>, (l, t, r, b): (i32, i32, i32, i32)) -> El
 
 /// Horizontal padding inside a module.
 const PAD: i32 = 10;
+/// Gap between a module's icon and its text.
+const ICON_GAP: i32 = 6;
 
-/// A module: its text, sized to fit; clickable if it has an on-click action.
+thread_local! {
+    /// The island style, when modules sit on islands.
+    static ISLANDS: Cell<Option<config::IslandStyle>> = const { Cell::new(None) };
+}
+
+/// Paints a module's island (when islands are on): its own background,
+/// with the bar's see-through gaps around it.
+pub fn island(x: i32, y: i32, w: i32, h: i32) {
+    let Some(style) = ISLANDS.with(Cell::get) else { return };
+    let t = heroui::theme::current();
+    // On a see-through bar the island is the bar color; on an opaque one
+    // (X11, no fork) it has to stand out from it.
+    draw::set_draw_color(if heroui::is_transparent() { t.background } else { t.surface });
+    let (y, h) = (y + 3, h - 6);
+    let r = match style {
+        config::IslandStyle::Sharp => 0,
+        config::IslandStyle::Rounded => t.radius.min(h / 2).min(10),
+        config::IslandStyle::Pill => h / 2,
+    };
+    if r == 0 {
+        draw::draw_rectf(x, y, w, h);
+    } else {
+        draw::draw_rounded_rectf(x, y, w, h, r);
+    }
+}
+
+fn icon_size(t: &Theme) -> i32 {
+    t.font_size + 2
+}
+
+/// A module's width for its icon and text (0 hides it). Built-in modules
+/// with nothing to report (no battery, no audio) hide, icon and all; a
+/// custom one can be just an icon.
+fn module_width(icon: &str, text: &str, custom: bool) -> i32 {
+    if text.is_empty() && !custom {
+        return 0;
+    }
+    let t = heroui::theme::current();
+    draw::set_font(t.font(), t.font_size);
+    let text_w = if text.is_empty() { 0 } else { draw::width(text).ceil() as i32 };
+    let icon_w = if icon.is_empty() { 0 } else { icon_size(&t) + if text.is_empty() { 0 } else { ICON_GAP } };
+    if text_w + icon_w == 0 {
+        0
+    } else {
+        text_w + icon_w + 2 * PAD
+    }
+}
+
+/// A module: its icon and text, sized to fit; clickable if it has an
+/// on-click action.
 fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let text: Rc<RefCell<String>> = Rc::default();
+        // (icon, text) shown.
+        let shown: Rc<RefCell<(String, String)>> = Rc::default();
         let paint = {
-            let text = text.clone();
+            let shown = shown.clone();
             move |w: &mut dyn WidgetExt, hovered: bool| {
                 // The theme in use now: it changes live (Appearance).
                 let t = heroui::theme::current();
+                island(w.x(), w.y(), w.w(), w.h());
                 if hovered {
                     draw::set_draw_color(t.surface_alt);
                     let h = w.h() - 6;
-                    draw::draw_rounded_rectf(w.x(), w.y() + 3, w.w(), h, t.radius.min(h / 2));
+                    let r = match ISLANDS.with(Cell::get) {
+                        Some(config::IslandStyle::Sharp) => 0,
+                        Some(config::IslandStyle::Pill) => h / 2,
+                        _ => t.radius.min(h / 2),
+                    };
+                    draw::draw_rounded_rectf(w.x(), w.y() + 3, w.w(), h, r);
+                }
+                let (icon, text) = &*shown.borrow();
+                let mut x = w.x() + PAD;
+                if !icon.is_empty() {
+                    let s = icon_size(&t);
+                    heroui::icons::draw(icon, x, w.y() + (w.h() - s) / 2, s, t.text);
+                    x += s + ICON_GAP;
                 }
                 draw::set_draw_color(t.text);
                 draw::set_font(t.font(), t.font_size);
-                draw::draw_text2(&text.borrow(), w.x(), w.y(), w.w(), w.h(), Align::Center);
+                draw::draw_text2(text, x, w.y(), w.x() + w.w() - x, w.h(), Align::Left | Align::Inside);
             }
         };
         // Clickable modules are buttons (FLTK handles the clicks, HeroUI the
@@ -236,17 +328,18 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
         let mut w = widget.clone();
         let last_width = Cell::new(-1);
         ctx.bind(move |bar: &Bar| {
-            let new = &bar.modules[i].text;
+            let m = &bar.modules[i];
             // The first run always sizes the module (last_width starts at
-            // -1), so one with no text yet takes no space instead of a
+            // -1), so one with nothing to show takes no space instead of a
             // share of the bar.
-            if *text.borrow() == *new && last_width.get() >= 0 {
-                return;
+            {
+                let cur = shown.borrow();
+                if cur.0 == m.icon && cur.1 == m.text && last_width.get() >= 0 {
+                    return;
+                }
             }
-            text.borrow_mut().clone_from(new);
-            let t = heroui::theme::current();
-            draw::set_font(t.font(), t.font_size);
-            let width = if new.is_empty() { 0 } else { draw::width(new).ceil() as i32 + 2 * PAD };
+            *shown.borrow_mut() = (m.icon.clone(), m.text.clone());
+            let width = module_width(&m.icon, &m.text, m.kind == modules::Kind::Custom);
             if width != last_width.replace(width) {
                 resize_module(&mut w, width, section, i, &widths);
             }
@@ -258,7 +351,7 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
 
 /// Gives a module its new width in its section, and keeps the center
 /// section as wide as its content.
-fn resize_module(w: &mut heroui::fltk::widget::Widget, width: i32, section: Section, i: usize, widths: &Sections) {
+pub fn resize_module(w: &mut heroui::fltk::widget::Widget, width: i32, section: Section, i: usize, widths: &Sections) {
     if width == 0 {
         w.hide();
     } else {
@@ -347,7 +440,10 @@ fn main() {
         config::Position::Bottom => Edge::Bottom,
     };
     let height = config.bar.height.max(1);
-    let mut settings = Settings::panel("herobar", edge, height).class("herobar");
+    if config.bar.islands {
+        ISLANDS.with(|c| c.set(Some(config.bar.island_style)));
+    }
+    let mut settings = Settings::panel("herobar", edge, height).class("herobar").transparent(config.bar.islands);
     settings.reserve = Some((edge, if config.bar.reserve_space { height } else { 0 }));
     if let Err(e) = heroui::run(Bar::new(config, watch), settings) {
         eprintln!("herobar: {e}");
