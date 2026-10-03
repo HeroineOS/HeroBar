@@ -49,6 +49,8 @@ pub struct Sys {
     pub bt_scanning: bool,
     /// What's going on / what went wrong, per popup.
     pub status: String,
+    /// The calendar's month, relative to this one.
+    pub cal_offset: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +83,8 @@ pub enum SysMsg {
     BtDo(BtCmd),
     BtDone(Result<(), String>),
     BtDevice(usize),
+    /// Calendar: months forward/back (0: back to this month).
+    CalShift(i32),
 }
 
 fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
@@ -88,7 +92,7 @@ fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
 }
 
 pub fn has_popup(kind: Kind) -> bool {
-    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth)
+    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock)
 }
 
 /// The command behind "Advanced...": the module's on-click, else the
@@ -128,7 +132,9 @@ impl Bar {
                 s.open = Some(i);
                 s.status.clear();
                 s.password_for = None;
+                s.cal_offset = 0;
                 return match self.modules[i].kind {
+                    Kind::Clock => Task::none(),
                     Kind::Volume => task(|| SysMsg::Audio(system::audio())),
                     Kind::Network => {
                         s.scanning = true;
@@ -319,6 +325,7 @@ impl Bar {
                 };
                 return task(|| SysMsg::Bt(system::bt()));
             }
+            SysMsg::CalShift(n) => s.cal_offset = if n == 0 { 0 } else { s.cal_offset + n },
             SysMsg::BtDevice(i) => {
                 let Some(d) = s.bt.as_ref().and_then(|b| b.devices.get(i)).cloned() else { return Task::none() };
                 let cmd = if d.connected {
@@ -700,4 +707,111 @@ pub fn bt_view(i: usize) -> Element<Bar, Msg> {
 pub fn bt_size(b: &Bar) -> (i32, i32) {
     let n = b.sys.bt.as_ref().filter(|x| x.powered).map_or(0, |x| x.devices.len());
     (WIDTH, (12 + 32 + 6 + rows_height(n) + 6 + 22 + 6 + 34 + 12).clamp(130, 520))
+}
+
+// --- Calendar -------------------------------------------------------------
+
+#[derive(Clone, PartialEq)]
+struct Month {
+    year: i32,
+    month: u32,
+    today: (i32, u32, u32),
+    /// Weeks start on Sunday (else Monday).
+    sunday_first: bool,
+}
+
+fn month_of(b: &Bar, i: usize) -> Month {
+    let today = crate::modules::today();
+    let (year, month) = crate::modules::add_months(today.0, today.1, b.sys.cal_offset);
+    Month { year, month, today, sunday_first: b.modules[i].cfg.first_weekday.as_deref() == Some("sunday") }
+}
+
+const CELL: i32 = 40;
+
+pub fn calendar_view(i: usize) -> Element<Bar, Msg> {
+    column(vec![
+        row(vec![
+            button("<", Msg::Sys(SysMsg::CalShift(-1))).fixed(40),
+            // The month; a click comes back to this one.
+            Element::new(move |ctx| {
+                let label = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+                let mut b = custom_button({
+                    let label = label.clone();
+                    move |b| {
+                        let t = heroui::theme::current();
+                        draw::set_font(t.bold_font(), t.font_size + 1);
+                        draw::set_draw_color(t.text);
+                        draw::draw_text2(&label.borrow(), b.x(), b.y(), b.w(), b.h(), Align::Center);
+                    }
+                });
+                let emit = ctx.emitter();
+                b.set_callback(move |_| emit(Msg::Sys(SysMsg::CalShift(0))));
+                let mut w = b.clone();
+                ctx.bind(move |bar: &Bar| {
+                    let m = month_of(bar, i);
+                    let l = crate::modules::format_date(m.year, m.month, 1, "%B %Y");
+                    if *label.borrow() != l {
+                        *label.borrow_mut() = l;
+                        heroui::widgets::repaint(&mut w);
+                    }
+                });
+                b.as_base_widget()
+            }),
+            button(">", Msg::Sys(SysMsg::CalShift(1))).fixed(40),
+        ])
+        .fixed(34),
+        canvas(move |b: &Bar| month_of(b, i), paint_month).fixed(26 + 6 * CELL),
+    ])
+    .padding(12)
+    .spacing(6)
+}
+
+pub fn calendar_size(_: &Bar) -> (i32, i32) {
+    (7 * CELL + 24, 12 + 34 + 6 + 26 + 6 * CELL + 12)
+}
+
+fn paint_month(m: &Month, x: i32, y: i32, w: i32, _h: i32, t: &Theme) {
+    use crate::modules::{days_in_month, format_date, weekday};
+    let cw = w / 7;
+    // Weekday names, in the user's language (from a week that starts on a
+    // Sunday: 2023-01-01).
+    draw::set_font(t.font(), t.font_size - 2);
+    draw::set_draw_color(t.text_dim);
+    for c in 0..7 {
+        let d = if m.sunday_first { c } else { (c + 1) % 7 };
+        let name = format_date(2023, 1, 1 + d as u32, "%a");
+        draw::draw_text2(&name, x + c * cw, y, cw, 22, Align::Center);
+    }
+    let first = weekday(m.year, m.month, 1) as i32;
+    let lead = if m.sunday_first { first } else { (first + 6) % 7 };
+    let days = days_in_month(m.year, m.month) as i32;
+    let (py, pm) = crate::modules::add_months(m.year, m.month, -1);
+    let prev_days = days_in_month(py, pm) as i32;
+    draw::set_font(t.font(), t.font_size);
+    for cell in 0..42 {
+        let (col, row) = (cell % 7, cell / 7);
+        let (cx, cy) = (x + col * cw, y + 26 + row * CELL);
+        let day = cell - lead + 1;
+        let (label, inside) = if day < 1 {
+            (prev_days + day, false)
+        } else if day > days {
+            (day - days, false)
+        } else {
+            (day, true)
+        };
+        let today = inside && (m.year, m.month, day as u32) == m.today;
+        if today {
+            let s = CELL - 6;
+            draw::set_draw_color(t.accent);
+            draw::draw_rounded_rectf(cx + (cw - s) / 2, cy + 3, s, s, t.radius.min(s / 2));
+        }
+        draw::set_draw_color(if today {
+            t.accent_text
+        } else if inside {
+            t.text
+        } else {
+            heroui::widgets::mix(t.text, t.background, 0.65)
+        });
+        draw::draw_text2(&label.to_string(), cx, cy, cw, CELL, Align::Center);
+    }
 }

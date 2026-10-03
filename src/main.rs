@@ -5,6 +5,7 @@
 
 mod apps;
 mod config;
+mod edit;
 mod fade;
 mod fit;
 mod modules;
@@ -58,6 +59,8 @@ struct Bar {
     workers: (bool, bool, bool),
     /// The first heartbeat happened: layout changes animate from now on.
     started: bool,
+    /// The taskbar folder whose popup is open.
+    folder: Option<taskbar::OpenFolder>,
 }
 
 /// Modules from `config`, reusing `old` ones with the same name and
@@ -148,6 +151,15 @@ enum Msg {
     Heartbeat,
     /// Apply the pending config (removed modules have shrunk away).
     Rebuild,
+    /// Taskbar module `i`'s right-click menu choice (`usize::MAX`: from
+    /// the open folder's popup).
+    TaskAction(usize, taskbar::TaskAction),
+    /// Open a taskbar folder (module, folder, button rectangle).
+    OpenFolder(usize, edit::PinPath, (i32, i32, i32, i32)),
+    /// Entry `k` of the open folder was clicked.
+    FolderEntry(usize),
+    FolderBack,
+    CloseFolder,
 }
 
 impl Bar {
@@ -170,6 +182,7 @@ impl Bar {
             leaving: HashSet::new(),
             pending: None,
             started: false,
+            folder: None,
         }
     }
 
@@ -184,6 +197,7 @@ impl Bar {
         self.config = config;
         self.open.clear();
         self.sys.open = None;
+        self.folder = None;
         self.leaving.clear();
         set_globals(&self.config);
         heroui::theme::set_current(self.theme());
@@ -235,7 +249,14 @@ impl Bar {
         let m = &self.modules[i];
         let in_group = self.parent[i].is_some();
         match m.kind {
-            Kind::Taskbar => taskbar::view(i),
+            Kind::Taskbar => popover_at(
+                taskbar::view(i),
+                |b: &Bar| b.folder.as_ref().map(|f| f.rect),
+                move |b: &Bar| b.folder.as_ref().is_some_and(|f| f.module == i),
+                Msg::CloseFolder,
+                taskbar::folder_size,
+                taskbar::folder_view(),
+            ),
             Kind::Workspaces => workspaces::view(i, m.font_size, in_group),
             Kind::Spacer => spacer_view(&m.cfg, center || in_group),
             Kind::Group => {
@@ -246,6 +267,7 @@ impl Bar {
                 let (content, size): (Element<Bar, Msg>, PopupSize) = match k {
                     Kind::Volume => (popups::volume_view(i), popups::volume_size),
                     Kind::Network => (popups::net_view(i), popups::net_size),
+                    Kind::Clock => (popups::calendar_view(i), popups::calendar_size),
                     _ => (popups::bt_view(i), popups::bt_size),
                 };
                 popover(
@@ -351,6 +373,65 @@ impl App for Bar {
                     std::thread::sleep(Duration::from_millis(200));
                     Msg::Rebuild
                 });
+            }
+            Msg::OpenFolder(i, path, rect) => {
+                // A second click on the same folder closes it.
+                self.folder = match &self.folder {
+                    Some(f) if f.module == i && f.path == path => None,
+                    _ => Some(taskbar::OpenFolder { module: i, path, rect }),
+                };
+            }
+            Msg::CloseFolder => self.folder = None,
+            Msg::FolderBack => {
+                if let Some(f) = &mut self.folder {
+                    f.path.pop();
+                }
+            }
+            Msg::FolderEntry(k) => {
+                let Some(item) = taskbar::open_item(self, k) else { return Task::none() };
+                if let (Some(f), Some(path)) = (&mut self.folder, item.folder.clone()) {
+                    f.path = path;
+                    return Task::none();
+                }
+                self.folder = None;
+                return self.update(Msg::Task(item, 1));
+            }
+            Msg::TaskAction(i, act) => {
+                use taskbar::TaskAction as A;
+                let module = if i == usize::MAX { self.folder.as_ref().map(|f| f.module) } else { Some(i) };
+                let Some(module) = module else { return Task::none() };
+                let name = self.modules[module].name.clone();
+                let edit = |f: &dyn Fn(&mut Vec<config::Pinned>)| {
+                    let path = self.watch.config.clone().or_else(config::default_path);
+                    match path {
+                        Some(p) => edit::pinned(&p, &name, f).map_err(|e| eprintln!("herobar: {e}")).is_ok(),
+                        None => false,
+                    }
+                };
+                let changed = match act {
+                    A::Pin(id) => edit(&|l| edit::pin(l, &id)),
+                    A::Unpin(p) => edit(&|l| {
+                        edit::remove(l, &p);
+                    }),
+                    A::MoveTo(id, f) => edit(&|l| edit::move_to(l, &id, f.clone())),
+                    A::NewFolder(id) => edit(&|l| edit::new_folder(l, &id, "New folder")),
+                    A::MoveOut(p) => edit(&|l| edit::move_out(l, &p)),
+                    A::Dissolve(p) => edit(&|l| edit::dissolve(l, &p)),
+                    A::Close(ids) => {
+                        if let Some(c) = &self.desktop.control {
+                            for id in ids {
+                                c.send(windows::Cmd::Close(id));
+                            }
+                        }
+                        false
+                    }
+                    A::Launch(cmd) => return Self::launch(cmd),
+                };
+                if changed {
+                    self.folder = None;
+                    // Picked up like any config edit: animated, no restart.
+                    return self.update(Msg::CheckReload);
+                }
             }
             Msg::Rebuild => {
                 if let Some(c) = self.pending.take() {

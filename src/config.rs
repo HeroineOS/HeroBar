@@ -109,8 +109,10 @@ pub struct Module {
     pub show: Option<String>,
     /// taskbar: "icons" or "icons-titles"; spacer: "none", "line" or "dots"
     pub style: Option<String>,
-    /// taskbar: apps to always show, as .desktop file names ("foot", "firefox-esr")
-    pub pinned: Option<Vec<String>>,
+    /// taskbar: apps to always show, as .desktop file names ("foot",
+    /// "firefox-esr"), and folders of them:
+    /// `{ folder = "Games", icon = "", apps = ["steam", ...] }`
+    pub pinned: Option<Vec<Pinned>>,
     /// taskbar: the most room it takes, in pixels; buttons shrink to fit
     pub max_width: Option<i32>,
     /// taskbar: always take max-width, so other modules never move
@@ -142,6 +144,27 @@ pub struct Module {
     pub padding: Option<i32>,
     pub icon_size: Option<i32>,
     pub font_size: Option<i32>,
+}
+
+/// A pinned app (its .desktop file name), or a folder of pinned apps and
+/// folders.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum Pinned {
+    App(String),
+    Folder(Folder),
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Folder {
+    /// Its name (shown on hover and in its popup).
+    pub folder: String,
+    /// Shown instead of small icons of its apps.
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub apps: Vec<Pinned>,
 }
 
 /// A string is shorthand for `{ action = "run-command", arg = "..." }`.
@@ -268,7 +291,7 @@ mod tests {
     fn default_config_parses() {
         let c = parse(DEFAULT).unwrap();
         assert_eq!(c.bar.modules_center, ["clock"]);
-        assert_eq!(c.modules["taskbar"].pinned.as_deref().unwrap_or_default().first().map(String::as_str), Some("foot"));
+        assert_eq!(c.modules["taskbar"].pinned.as_deref().unwrap_or_default().first(), Some(&Pinned::App("foot".into())));
         assert_eq!(c.bar.island_style, IslandStyle::Rounded);
         assert_eq!(c.modules["custom/menu"].on_click.as_ref().unwrap().command(), Some("heroappearance"));
     }
@@ -279,6 +302,9 @@ mod tests {
         assert!(parse("[bar]\nmodules-left = [\"weather\"]").is_err());
         assert!(parse("[modules.clock]\non-click = { action = \"quit\" }").is_err());
         assert!(parse("[modules.taskbar]\nstyle = \"big\"").is_err());
+        let c = parse("[modules.taskbar]\npinned = [\"foot\", { folder = \"Games\", apps = [\"steam\", { folder = \"Emu\", icon = \"retroarch\", apps = [] }] }]").unwrap();
+        let p = c.modules["taskbar"].pinned.clone().unwrap();
+        assert!(matches!(&p[1], Pinned::Folder(f) if f.folder == "Games" && matches!(&f.apps[1], Pinned::Folder(e) if e.icon.as_deref() == Some("retroarch"))));
         assert!(parse("[modules.\"group/a\"]\nmodules = [\"group/b\"]").is_err());
         assert!(parse("[bar]\nmodules-left = [\"cpu/2\", \"spacer/x\", \"group/sys\"]\n[modules.\"group/sys\"]\nmodules = [\"cpu\", \"memory/big\"]").is_ok());
     }

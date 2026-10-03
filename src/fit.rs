@@ -118,6 +118,9 @@ fn apply(w: &mut Widget, width: i32) {
     let Some(mut flex) = Flex::from_dyn_widget(&parent) else { return };
     flex.fixed(&*w, width);
     flex.recalc();
+    // Repaint the whole row, background included: space a module gave up
+    // must not keep showing it.
+    heroui::widgets::repaint(&mut flex);
     if is_content_sized(&flex) {
         // Follows its content frame by frame (no animation of its own).
         let total = content_width(&flex);

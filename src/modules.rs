@@ -548,9 +548,63 @@ pub fn strftime(format: &str) -> String {
     }
 }
 
+/// Today: (year, month 1-12, day).
+pub fn today() -> (i32, u32, u32) {
+    let d = |f: &str| strftime(f).parse::<i32>().unwrap_or(1);
+    (d("%Y"), d("%m") as u32, d("%d") as u32)
+}
+
+/// Formats a date of the calendar (`format` as strftime), in the user's
+/// language.
+pub fn format_date(year: i32, month: u32, day: u32, format: &str) -> String {
+    let Ok(fmt) = CString::new(format) else { return String::new() };
+    unsafe {
+        let mut tm: Tm = std::mem::zeroed();
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month as c_int - 1;
+        tm.tm_mday = day as c_int;
+        tm.tm_wday = weekday(year, month, day) as c_int;
+        let mut buf = [0u8; 128];
+        let n = c_strftime(buf.as_mut_ptr() as *mut c_char, buf.len(), fmt.as_ptr(), &tm);
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+}
+
+/// Day of the week, 0 = Sunday (Sakamoto's method).
+pub fn weekday(year: i32, month: u32, day: u32) -> u32 {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    ((y + y / 4 - y / 100 + y / 400 + T[month as usize - 1] + day as i32).rem_euclid(7)) as u32
+}
+
+pub fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        _ => 31,
+    }
+}
+
+/// The month `offset` months from (year, month).
+pub fn add_months(year: i32, month: u32, offset: i32) -> (i32, u32) {
+    let m = year * 12 + month as i32 - 1 + offset;
+    (m.div_euclid(12), m.rem_euclid(12) as u32 + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calendar_math() {
+        assert_eq!(weekday(2026, 10, 3), 6, "a Saturday");
+        assert_eq!(weekday(2024, 1, 1), 1, "a Monday");
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(2100, 2), 28);
+        assert_eq!(add_months(2026, 1, -1), (2025, 12));
+        assert_eq!(add_months(2026, 12, 1), (2027, 1));
+    }
 
     #[test]
     fn placeholders() {
