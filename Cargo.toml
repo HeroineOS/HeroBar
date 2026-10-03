@@ -1,6 +1,6 @@
 [package]
 name = "herobar"
-version = "0.1.7"
+version = "0.1.8"
 description = "A lightweight status bar for Wayland (and X11), built on HeroUI"
 repository = "https://github.com/HeroineOS/HeroBar"
 license = "MIT OR Apache-2.0"
@@ -11,6 +11,7 @@ heroui = { git = "https://github.com/HeroineOS/HeroUI", features = ["layer-shell
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
+toml_edit = { version = "0.23", default-features = false, features = ["parse", "display"] }
 
 # Native Wayland panels need wlr-layer-shell, which upstream fltk-sys lacks.
 # The HeroineOS fork is fltk-sys 1.5.23 plus layer-shell (same API).

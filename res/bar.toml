@@ -53,6 +53,7 @@ modules-right = ["volume", "network", "group/system", "battery"]
 #   interval = 2               # Seconds between updates
 #   on-click = "command"       # Shorthand for the table form below
 #   on-click = { action = "run-command", arg = "command" }
+#   tooltip = false            # No details when the mouse rests on it
 #   icon = "name"              # Shown before the text: a built-in icon (apps, app,
 #                              # battery, clock, cpu, memory, network-wired,
 #                              # network-wireless, network-offline, power, search,
@@ -66,10 +67,12 @@ modules-right = ["volume", "network", "group/system", "battery"]
 #
 # Commands run through "sh -c", like the compositor's run-command action.
 
-# Placeholders follow strftime: man 3 strftime
+# Placeholders follow strftime: man 3 strftime. Click: a calendar of the
+# month (popup = false turns it off).
 [modules.clock]
 format = "%a %d %b  %H:%M"
 interval = 1
+first-weekday = "monday"   # or "sunday", in the calendar
 
 # {usage}: busy CPU time since the last update, in percent
 [modules.cpu]
@@ -81,8 +84,9 @@ interval = 2
 format = "{used}/{total} GiB"
 interval = 5
 
-# {capacity} (percent), {status}: Charging, Discharging, Full...
-# Hidden on machines without a battery.
+# {capacity} (percent), {status}: Charging, Discharging, Full...,
+# {time}: until empty or full. The icon shows the level, or charging.
+# Hover: percent, status and time left. Hidden without a battery.
 [modules.battery]
 format = "{capacity}%"
 interval = 30
@@ -109,7 +113,11 @@ show = "all"             # "all", or "occupied" (with windows, plus the shown on
 # output = "eDP-1"       # Whose workspaces (default: the active monitor)
 
 # Open windows and pinned apps. Click: open/focus (again: next window of the
-# app); middle click: close the window.
+# app); middle click: close the window; right click: pin/unpin, move to a
+# folder, close... (the bar edits this file itself, keeping comments).
+# Folders keep pinned apps tidy: { folder = "Games", apps = ["steam", ...] }
+# (folders in folders too; icon = "..." instead of small icons of its apps).
+# A click on a folder opens it; running apps pinned in a folder stay in it.
 # Window list from HeroWM's IPC, or wlr-foreign-toplevel-management (sway,
 # Hyprland, labwc, river, Wayfire...).
 [modules.taskbar]
