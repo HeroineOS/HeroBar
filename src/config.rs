@@ -130,7 +130,11 @@ pub struct Module {
     pub modules: Option<Vec<String>>,
     /// group: collapsed to its icon; a click shows the modules
     pub drawer: Option<bool>,
-    /// volume, network, bluetooth: a click opens a popup (default true);
+    /// Details when the mouse rests on it (default true).
+    pub tooltip: Option<bool>,
+    /// clock: the first day of the week in its calendar: "monday" or "sunday"
+    pub first_weekday: Option<String>,
+    /// volume, network, bluetooth, clock: a click opens a popup (default true);
     /// false runs on-click instead. With the popup, on-click is its
     /// "Advanced" button.
     pub popup: Option<bool>,
@@ -211,6 +215,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             }
             Kind::Workspaces => one_of(name, "show", &m.show, &["all", "occupied"])?,
             Kind::Spacer => one_of(name, "style", &m.style, &["none", "line", "dots"])?,
+            Kind::Clock => one_of(name, "first-weekday", &m.first_weekday, &["monday", "sunday"])?,
             Kind::Group => {
                 for member in m.modules.iter().flatten() {
                     if matches!(check_name(member)?, Kind::Group) {

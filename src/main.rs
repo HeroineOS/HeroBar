@@ -602,13 +602,51 @@ fn module_width(icon: &str, text: &str, custom: bool, sz: ModSizes) -> i32 {
     }
     let t = heroui::theme::current();
     draw::set_font(t.font(), sz.font(&t));
-    let text_w = if text.is_empty() { 0 } else { draw::width(text).ceil() as i32 };
+    let text_w = text_width(text, sz.icon(&t));
     let icon_w = if icon.is_empty() { 0 } else { sz.icon(&t) + if text.is_empty() { 0 } else { ICON_GAP } };
     if text_w + icon_w == 0 {
         0
     } else {
         text_w + icon_w + 2 * sz.padding
     }
+}
+
+/// A piece of module text: words, or an inline icon (`{icon:name}` in a
+/// format, e.g. arrows before network speeds).
+enum Seg<'a> {
+    Text(&'a str),
+    Icon(&'a str),
+}
+
+fn segments(text: &str) -> Vec<Seg<'_>> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("{icon:") {
+        let Some(end) = rest[i..].find('}') else { break };
+        if i > 0 {
+            out.push(Seg::Text(&rest[..i]));
+        }
+        out.push(Seg::Icon(&rest[i + 6..i + end]));
+        rest = &rest[i + end + 1..];
+    }
+    if !rest.is_empty() {
+        out.push(Seg::Text(rest));
+    }
+    out
+}
+
+/// Gap after an inline icon.
+const INLINE_GAP: i32 = 2;
+
+/// Width of module text with inline icons `icon` px wide (font set).
+fn text_width(text: &str, icon: i32) -> i32 {
+    segments(text)
+        .iter()
+        .map(|s| match s {
+            Seg::Text(t) => draw::width(t).ceil() as i32,
+            Seg::Icon(_) => icon * 4 / 5 + INLINE_GAP,
+        })
+        .sum()
 }
 
 /// Paints a module: island (unless in a group), hover, icon, text.
@@ -643,9 +681,23 @@ fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_gro
         heroui::icons::draw(icon, x, w.y() + (w.h() - s) / 2, s, t.text);
         x += s + ICON_GAP;
     }
-    draw::set_draw_color(t.text);
     draw::set_font(t.font(), sz.font(&t));
-    draw::draw_text2(text, x, w.y(), w.x() + w.w() - x, w.h(), Align::Left | Align::Inside);
+    // Inline icons are a bit smaller than the module's icon.
+    let small = sz.icon(&t) * 4 / 5;
+    for seg in segments(text) {
+        match seg {
+            Seg::Text(s) => {
+                draw::set_draw_color(t.text);
+                let tw = draw::width(s).ceil() as i32;
+                draw::draw_text2(s, x, w.y(), tw + 2, w.h(), Align::Left | Align::Inside);
+                x += tw;
+            }
+            Seg::Icon(name) => {
+                heroui::icons::draw(name, x, w.y() + (w.h() - small) / 2, small, t.text);
+                x += small + INLINE_GAP;
+            }
+        }
+    }
 }
 
 /// A popup's size from the state.
@@ -710,6 +762,10 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
         ctx.bind(move |bar: &Bar| {
             let m = &bar.modules[i];
             let hidden = bar.gone(i);
+            // Details on hover (XFCE-style); FLTK shows them.
+            if m.cfg.tooltip != Some(false) && w.tooltip().unwrap_or_default() != m.tooltip {
+                w.set_tooltip(&m.tooltip);
+            }
             // The first run always sizes the module (last_width starts at
             // -1), so one with nothing to show takes no space instead of a
             // share of the bar.
@@ -723,8 +779,9 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
             was_hidden.set(hidden || m.absent);
             sizes.set(ModSizes::of(m));
             *shown.borrow_mut() = (m.icon.clone(), m.text.clone());
-            // Custom and Bluetooth modules may be just an icon.
-            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth);
+
+            // Custom, Bluetooth and network modules may be just an icon.
+            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network);
             let mut width = if hidden || m.absent { 0 } else { module_width(&m.icon, &m.text, icon_only, sizes.get()) };
             // Changing numbers (network speeds) would make the module and
             // its neighbors jitter: it grows at once but only shrinks when

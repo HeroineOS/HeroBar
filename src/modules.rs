@@ -105,6 +105,8 @@ pub struct Module {
     pub text: String,
     /// Icon shown before the text ("" = none).
     pub icon: String,
+    /// Shown when the mouse rests on it.
+    pub tooltip: String,
     /// The config's `icon`; None picks the kind's (possibly dynamic) icon.
     icon_cfg: Option<String>,
     pub command: Option<String>,
@@ -142,6 +144,7 @@ impl Module {
             name: name.to_owned(),
             kind,
             text: String::new(),
+            tooltip: String::new(),
             icon: icon_cfg.clone().unwrap_or_else(|| kind.default_icon().to_owned()),
             icon_cfg,
             command: cfg.on_click.as_ref().and_then(|a| a.command()).map(str::to_owned),
@@ -217,6 +220,7 @@ impl Module {
             return;
         };
         self.text = fill(&self.format, &[("volume", vol.to_string())]);
+        self.tooltip = if muted { format!("Volume: {vol}% (muted)") } else { format!("Volume: {vol}%") };
         self.set_icon(if muted || vol == 0 {
             "volume-muted"
         } else if vol < 50 {
@@ -248,6 +252,13 @@ impl Module {
         } else {
             "bluetooth-connected"
         });
+        self.tooltip = if !bt.powered {
+            "Bluetooth: off".into()
+        } else if connected.is_empty() {
+            "Bluetooth: on, nothing connected".into()
+        } else {
+            format!("Bluetooth: connected to {}", connected.join(", "))
+        };
         self.text = if connected.is_empty() {
             String::new()
         } else {
@@ -266,12 +277,16 @@ impl Module {
     /// by the caller on a background thread instead.
     pub fn refresh(&mut self) {
         let text = match self.kind {
-            Kind::Clock => strftime(&self.format),
+            Kind::Clock => {
+                self.tooltip = strftime("%A %-d %B %Y");
+                strftime(&self.format)
+            }
             Kind::Cpu => {
                 let (busy, total) = cpu_jiffies();
                 let (db, dt) = (busy.saturating_sub(self.last_cpu.0), total.saturating_sub(self.last_cpu.1));
                 self.last_cpu = (busy, total);
                 let usage = if dt > 0 { 100 * db / dt } else { 0 };
+                self.tooltip = format!("CPU: {usage}% busy");
                 fill(&self.format, &[("usage", usage.to_string())])
             }
             Kind::Memory => {
@@ -281,6 +296,7 @@ impl Module {
                 } else {
                     let gib = |kib: u64| kib as f64 / 1024.0 / 1024.0;
                     let used = total.saturating_sub(avail);
+                    self.tooltip = format!("Memory: {:.1} GiB used of {:.1} GiB ({}%)", gib(used), gib(total), 100 * used / total);
                     fill(
                         &self.format,
                         &[
@@ -291,7 +307,7 @@ impl Module {
                     )
                 }
             }
-            Kind::Battery => match &self.battery {
+            Kind::Battery => match self.battery.clone() {
                 Some(b) => {
                     let read = |f: &str| {
                         std::fs::read_to_string(format!("/sys/class/power_supply/{b}/{f}"))
@@ -306,7 +322,20 @@ impl Module {
                         let level: u32 = capacity.parse().unwrap_or(100);
                         let charging = status == "Charging";
                         self.set_icon(&format!("battery-{}{}", (level + 5) / 10 * 10, if charging { "-charging" } else { "" }));
-                        fill(&self.format, &[("capacity", capacity), ("status", status)])
+                        let num = |f: &str| read(f).parse::<f64>().ok();
+                        let time = battery_time(
+                            &status,
+                            num("energy_now").or(num("charge_now")),
+                            num("energy_full").or(num("charge_full")),
+                            num("power_now").or(num("current_now")),
+                        );
+                        self.tooltip = match (&time, status.as_str()) {
+                            (Some(t), "Charging") => format!("Battery: {level}%\nCharging, full in {t}"),
+                            (Some(t), _) => format!("Battery: {level}%\n{t} left"),
+                            (None, "Full") | (None, "Not charging") => format!("Battery: {level}%\nFully charged"),
+                            (None, s) => format!("Battery: {level}%\n{s}"),
+                        };
+                        fill(&self.format, &[("capacity", capacity), ("status", status), ("time", time.unwrap_or_default())])
                     }
                 }
                 None => String::new(),
@@ -337,6 +366,15 @@ impl Module {
                     let essid = if wireless { self.essid.clone().unwrap_or_default() } else { String::new() };
                     let name = if essid.is_empty() { ifname.clone() } else { essid.clone() };
                     let b = crate::system::bytes;
+                    self.tooltip = format!(
+                        "{}{}\nDown {}/s  ·  Up {}/s\nReceived {}  ·  Sent {}",
+                        if wireless { format!("Wi-Fi: {name}") } else { format!("Wired: {ifname}") },
+                        signal.map(|s| format!("\nSignal: {s}%")).unwrap_or_default(),
+                        b(down),
+                        b(up),
+                        b(rx as f64),
+                        b(tx as f64),
+                    );
                     fill(
                         &self.format,
                         &[
@@ -354,6 +392,7 @@ impl Module {
                 }
                 None => {
                     self.set_icon("network-offline");
+                    self.tooltip = "Not connected".into();
                     self.format_disconnected.clone()
                 }
             },
@@ -367,6 +406,26 @@ impl Module {
 struct CustomOutput {
     text: Option<String>,
     icon: Option<String>,
+}
+
+/// "2 h 13 min" until empty (discharging) or full (charging), from the
+/// battery's energy (or charge) and power (or current); None when it
+/// can't be told (idle, full, missing values).
+pub fn battery_time(status: &str, now: Option<f64>, full: Option<f64>, rate: Option<f64>) -> Option<String> {
+    let (now, rate) = (now?, rate?);
+    if rate <= 0.0 {
+        return None;
+    }
+    let hours = match status {
+        "Discharging" => now / rate,
+        "Charging" => (full? - now).max(0.0) / rate,
+        _ => return None,
+    };
+    let mins = (hours * 60.0).round() as u64;
+    if mins > 48 * 60 {
+        return None;
+    }
+    Some(if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") })
 }
 
 /// Replaces `{key}` placeholders.
@@ -516,6 +575,14 @@ mod tests {
         assert_eq!(Kind::from_name("spacer"), Some(Kind::Spacer));
         assert_eq!(Kind::from_name("group"), None);
         assert_eq!(Kind::from_name("group/sys"), Some(Kind::Group));
+    }
+
+    #[test]
+    fn battery_estimates() {
+        assert_eq!(battery_time("Discharging", Some(30.0), Some(50.0), Some(13.5)).as_deref(), Some("2 h 13 min"));
+        assert_eq!(battery_time("Charging", Some(40.0), Some(50.0), Some(20.0)).as_deref(), Some("30 min"));
+        assert_eq!(battery_time("Full", Some(50.0), Some(50.0), Some(0.0)), None);
+        assert_eq!(battery_time("Discharging", Some(30.0), None, None), None);
     }
 
     #[test]
