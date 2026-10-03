@@ -7,7 +7,9 @@ mod apps;
 mod config;
 mod fit;
 mod modules;
+mod popups;
 mod reload;
+mod system;
 mod taskbar;
 mod windows;
 mod workspaces;
@@ -43,6 +45,8 @@ struct Bar {
     open: HashSet<usize>,
     /// Windows and workspaces, for taskbar and workspaces modules.
     desktop: taskbar::Desktop,
+    /// Audio, network, Bluetooth and their popups.
+    sys: popups::Sys,
 }
 
 #[derive(Clone)]
@@ -64,6 +68,8 @@ enum Msg {
     Workspace(u64),
     /// Open or close group `i`'s drawer.
     Drawer(usize),
+    /// Volume, network and Bluetooth popups and state.
+    Sys(popups::SysMsg),
 }
 
 impl Bar {
@@ -91,7 +97,7 @@ impl Bar {
         let left = section(&config.bar.modules_left);
         let center = section(&config.bar.modules_center);
         let right = section(&config.bar.modules_right);
-        Bar { config, watch, modules, left, center, right, parent, open: HashSet::new(), desktop: taskbar::Desktop::default() }
+        Bar { config, watch, modules, left, center, right, parent, open: HashSet::new(), desktop: taskbar::Desktop::default(), sys: popups::Sys::default() }
     }
 
     /// The modules in group `g`.
@@ -123,7 +129,21 @@ impl Bar {
                 let members = self.members(i).into_iter().map(|j| self.module_element(j, center)).collect();
                 group_view(i, members, m.cfg.drawer == Some(true), m.icon.clone())
             }
-            _ => module_view(i, m.command.is_some(), in_group),
+            k if popups::has_popup(k) && m.cfg.popup != Some(false) => {
+                let (content, size): (Element<Bar, Msg>, PopupSize) = match k {
+                    Kind::Volume => (popups::volume_view(i), popups::volume_size),
+                    Kind::Network => (popups::net_view(i), popups::net_size),
+                    _ => (popups::bt_view(i), popups::bt_size),
+                };
+                popover(
+                    module_view(i, Click::Popup, in_group),
+                    move |b: &Bar| b.sys.open == Some(i),
+                    Msg::Sys(popups::SysMsg::Closed(i)),
+                    size,
+                    content,
+                )
+            }
+            _ => module_view(i, if m.command.is_some() { Click::Command } else { Click::None }, in_group),
         }
     }
 }
@@ -133,6 +153,10 @@ impl App for Bar {
 
     fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
+            Msg::Sys(m) => return self.update_sys(m),
+            Msg::Tick(i) if self.modules[i].kind == Kind::Bluetooth => {
+                return Task::perform(|| Msg::Sys(popups::SysMsg::Bt(system::bt())));
+            }
             Msg::Tick(i) => {
                 let m = &mut self.modules[i];
                 if let Some(cmd) = m.exec.clone() {
@@ -216,9 +240,19 @@ impl App for Bar {
     }
 
     fn init(&mut self) -> Task<Msg> {
-        // Custom commands produce their first output right away.
-        let custom: Vec<usize> = (0..self.modules.len()).filter(|&i| self.modules[i].exec.is_some()).collect();
-        Task::batch(custom.into_iter().map(|i| self.update(Msg::Tick(i))))
+        // Commands and Bluetooth produce their first output right away.
+        let first: Vec<usize> = (0..self.modules.len())
+            .filter(|&i| self.modules[i].exec.is_some() || self.modules[i].kind == Kind::Bluetooth)
+            .collect();
+        let mut tasks: Vec<Task<Msg>> = first.into_iter().map(|i| self.update(Msg::Tick(i))).collect();
+        let has = |k: Kind| self.modules.iter().any(|m| m.kind == k);
+        if has(Kind::Volume) && system::have("pactl") {
+            tasks.push(Task::perform(|| Msg::Sys(popups::SysMsg::Audio(system::audio()))));
+        }
+        if has(Kind::Network) && system::have("nmcli") {
+            tasks.push(Task::perform(|| Msg::Sys(popups::SysMsg::Ssid(system::active_ssid()))));
+        }
+        Task::batch(tasks)
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
@@ -233,6 +267,13 @@ impl App for Bar {
             .chain([Subscription::every(Duration::from_secs(1), Msg::CheckReload)])
             .chain(desktop.then(|| {
                 Subscription::worker(move |tx: heroui::Sender<Msg>| windows::run(output, move |u| tx.send(Msg::Windows(u))))
+            }))
+            // Sound server and NetworkManager events, instead of polling.
+            .chain((self.modules.iter().any(|m| m.kind == Kind::Volume && m.exec.is_none()) && system::have("pactl")).then(|| {
+                Subscription::worker(|tx: heroui::Sender<Msg>| system::audio_watch(move || tx.send(Msg::Sys(popups::SysMsg::AudioChanged))))
+            }))
+            .chain((self.modules.iter().any(|m| m.kind == Kind::Network) && system::have("nmcli")).then(|| {
+                Subscription::worker(|tx: heroui::Sender<Msg>| system::net_watch(move || tx.send(Msg::Sys(popups::SysMsg::NetChanged))))
             }))
             .collect()
     }
@@ -413,9 +454,22 @@ fn paint_module(w: &dyn WidgetExt, icon: &str, text: &str, hovered: bool, in_gro
     draw::draw_text2(text, x, w.y(), w.x() + w.w() - x, w.h(), Align::Left | Align::Inside);
 }
 
+/// A popup's size from the state.
+type PopupSize = fn(&Bar) -> (i32, i32);
+
+/// What clicking a module does.
+#[derive(Clone, Copy, PartialEq)]
+enum Click {
+    None,
+    /// Runs its on-click command (on release, like a button).
+    Command,
+    /// Opens its popup (on press: Wayland grants popups for a press).
+    Popup,
+}
+
 /// A module: its icon and text, sized to fit; clickable if it has an
-/// on-click action.
-fn module_view(i: usize, clickable: bool, in_group: bool) -> Element<Bar, Msg> {
+/// on-click action or a popup.
+fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
         // (icon, text) shown.
         let shown: Rc<RefCell<(String, String)>> = Rc::default();
@@ -430,7 +484,19 @@ fn module_view(i: usize, clickable: bool, in_group: bool) -> Element<Bar, Msg> {
         };
         // Clickable modules are buttons (FLTK handles the clicks, HeroUI the
         // hover); the others are plain frames.
-        let widget = if clickable {
+        let widget = if click == Click::Popup {
+            let mut b = press_button(move |b| {
+                let hovered = is_hovered(b) || b.value();
+                paint(b, hovered)
+            });
+            let emit = ctx.emitter();
+            b.set_callback(move |b| {
+                if b.value() {
+                    emit(Msg::Sys(popups::SysMsg::Open(i)))
+                }
+            });
+            b.as_base_widget()
+        } else if click == Click::Command {
             let mut b = custom_button(move |b| {
                 let hovered = is_hovered(b) || b.value();
                 paint(b, hovered)
@@ -455,14 +521,23 @@ fn module_view(i: usize, clickable: bool, in_group: bool) -> Element<Bar, Msg> {
             // share of the bar.
             {
                 let cur = shown.borrow();
+                let hidden = hidden || m.absent;
                 if cur.0 == m.icon && cur.1 == m.text && last_width.get() >= 0 && was_hidden.get() == hidden {
                     return;
                 }
             }
-            was_hidden.set(hidden);
+            was_hidden.set(hidden || m.absent);
             sizes.set(ModSizes::of(m));
             *shown.borrow_mut() = (m.icon.clone(), m.text.clone());
-            let width = if hidden { 0 } else { module_width(&m.icon, &m.text, m.kind == Kind::Custom, sizes.get()) };
+            // Custom and Bluetooth modules may be just an icon.
+            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth);
+            let mut width = if hidden || m.absent { 0 } else { module_width(&m.icon, &m.text, icon_only, sizes.get()) };
+            // Changing numbers (network speeds) would make the module and
+            // its neighbors jitter: it grows at once but only shrinks when
+            // it's clearly narrower.
+            if m.jittery() && width > 0 && width < last_width.get() && width * 4 > last_width.get() * 3 {
+                width = last_width.get();
+            }
             if width != last_width.replace(width) {
                 fit::set_width(&mut w, width);
             }

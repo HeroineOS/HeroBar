@@ -130,6 +130,10 @@ pub struct Module {
     pub modules: Option<Vec<String>>,
     /// group: collapsed to its icon; a click shows the modules
     pub drawer: Option<bool>,
+    /// volume, network, bluetooth: a click opens a popup (default true);
+    /// false runs on-click instead. With the popup, on-click is its
+    /// "Advanced" button.
+    pub popup: Option<bool>,
     /// Size overrides for this module (see [style]).
     pub padding: Option<i32>,
     pub icon_size: Option<i32>,
@@ -171,7 +175,7 @@ pub fn default_path() -> Option<PathBuf> {
 }
 
 /// The kinds a module name can start with ("cpu", "cpu/2", "custom/x").
-pub const KINDS: &str = "clock, cpu, memory, battery, network, volume, taskbar, workspaces, spacer, group/<name>, custom/<name>";
+pub const KINDS: &str = "clock, cpu, memory, battery, network, volume, bluetooth, taskbar, workspaces, spacer, group/<name>, custom/<name>";
 
 fn check_name(name: &str) -> Result<crate::modules::Kind, String> {
     crate::modules::Kind::from_name(name).ok_or_else(|| format!("unknown module kind '{name}' (built-in: {KINDS}; add /<anything> for more of one kind)"))

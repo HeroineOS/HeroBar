@@ -16,6 +16,7 @@ pub enum Kind {
     Volume,
     Taskbar,
     Workspaces,
+    Bluetooth,
     Spacer,
     Group,
     Custom,
@@ -41,6 +42,7 @@ impl Kind {
             "volume" => Kind::Volume,
             "taskbar" => Kind::Taskbar,
             "workspaces" => Kind::Workspaces,
+            "bluetooth" => Kind::Bluetooth,
             "spacer" => Kind::Spacer,
             "group" if rest.is_some() => Kind::Group,
             "custom" if rest.is_some() => Kind::Custom,
@@ -53,6 +55,7 @@ impl Kind {
             Kind::Clock => 1.0,
             Kind::Cpu => 2.0,
             Kind::Memory | Kind::Network | Kind::Volume => 5.0,
+            Kind::Bluetooth => 10.0,
             Kind::Battery => 30.0,
             _ => 10.0,
         }
@@ -64,7 +67,8 @@ impl Kind {
             Kind::Cpu => "{usage}%",
             Kind::Memory => "{used}/{total} GiB",
             Kind::Battery => "{capacity}%",
-            Kind::Network => "{ifname}",
+            Kind::Network => "{name}",
+            Kind::Bluetooth => "{device}",
             Kind::Volume => "{volume}%",
             _ => "",
         }
@@ -79,6 +83,7 @@ impl Kind {
             Kind::Battery => "battery",
             Kind::Network => "network-wired",
             Kind::Volume => "volume-high",
+            Kind::Bluetooth => "bluetooth",
             Kind::Group => "apps",
             _ => "",
         }
@@ -117,6 +122,12 @@ pub struct Module {
     pub font_size: Option<i32>,
     /// cpu: last (busy, total) jiffies
     last_cpu: (u64, u64),
+    /// Nothing to show (no Bluetooth adapter): takes no space.
+    pub absent: bool,
+    /// network: the Wi-Fi network's name, from NetworkManager
+    pub essid: Option<String>,
+    /// network: (interface, received, sent, when) at the last refresh
+    last_net: Option<(String, u64, u64, std::time::Instant)>,
 }
 
 impl Module {
@@ -135,7 +146,13 @@ impl Module {
             format: cfg.format.clone().unwrap_or_else(|| kind.default_format().to_owned()),
             format_disconnected: cfg.format_disconnected.clone().unwrap_or_else(|| "offline".into()),
             fixed_text: cfg.text.clone(),
-            exec: if kind == Kind::Volume { Some(cfg.exec.clone().unwrap_or_else(|| VOLUME_CMD.to_owned())) } else { cfg.exec.clone() },
+            exec: match kind {
+                // With pactl, volume follows the sound server's events
+                // (popups.rs); without it, a command polls.
+                Kind::Volume if cfg.exec.is_none() && crate::system::have("pactl") => None,
+                Kind::Volume => Some(cfg.exec.clone().unwrap_or_else(|| VOLUME_CMD.to_owned())),
+                _ => cfg.exec.clone(),
+            },
             battery: cfg.name.clone(),
             taskbar: (kind == Kind::Taskbar).then(|| crate::taskbar::Config::new(Some(cfg))),
             cfg: cfg.clone(),
@@ -143,6 +160,9 @@ impl Module {
             icon_size: cfg.icon_size,
             font_size: cfg.font_size,
             last_cpu: (0, 0),
+            absent: kind == Kind::Bluetooth,
+            essid: None,
+            last_net: None,
         };
         if kind == Kind::Battery && m.battery.is_none() {
             m.battery = first_battery();
@@ -160,7 +180,7 @@ impl Module {
     /// True if the module changes over time (needs a timer).
     pub fn is_dynamic(&self) -> bool {
         match self.kind {
-            Kind::Custom => self.exec.is_some(),
+            Kind::Custom | Kind::Volume => self.exec.is_some(),
             // Updated by compositor events, or not at all.
             Kind::Taskbar | Kind::Workspaces | Kind::Spacer | Kind::Group => false,
             _ => true,
@@ -201,6 +221,35 @@ impl Module {
         } else {
             "volume-high"
         });
+    }
+
+    /// True if its text keeps changing width (speeds): its width is kept
+    /// steadier.
+    pub fn jittery(&self) -> bool {
+        self.kind == Kind::Network && (self.format.contains("{down}") || self.format.contains("{up}"))
+    }
+
+    /// Shows the Bluetooth state: hidden without an adapter, off, on, or
+    /// the connected device.
+    pub fn set_bt(&mut self, bt: Option<&crate::system::Bt>) {
+        let Some(bt) = bt else {
+            self.absent = true;
+            return;
+        };
+        self.absent = false;
+        let connected: Vec<&str> = bt.connected().map(|d| d.name.as_str()).collect();
+        self.set_icon(if !bt.powered {
+            "bluetooth-off"
+        } else if connected.is_empty() {
+            "bluetooth"
+        } else {
+            "bluetooth-connected"
+        });
+        self.text = if connected.is_empty() {
+            String::new()
+        } else {
+            fill(&self.format, &[("device", connected[0].to_owned()), ("count", connected.len().to_string())])
+        };
     }
 
     /// Sets the dynamic icon, unless the config chose one.
@@ -262,11 +311,43 @@ impl Module {
             Kind::Network => match default_route_interface() {
                 Some(ifname) => {
                     let wireless = std::path::Path::new(&format!("/sys/class/net/{ifname}/wireless")).exists();
-                    self.set_icon(if wireless { "network-wireless" } else { "network-wired" });
+                    let signal = if wireless { crate::system::wifi_signal(&ifname) } else { None };
+                    match signal {
+                        Some(s) => self.set_icon(&format!("network-wireless-{s}")),
+                        None if wireless => self.set_icon("network-wireless"),
+                        None => self.set_icon("network-wired"),
+                    }
                     let state = std::fs::read_to_string(format!("/sys/class/net/{ifname}/operstate"))
                         .map(|s| s.trim().to_owned())
                         .unwrap_or_default();
-                    fill(&self.format, &[("ifname", ifname), ("state", state)])
+                    // Speeds since the last refresh.
+                    let now = std::time::Instant::now();
+                    let (rx, tx) = crate::system::traffic(&ifname).unwrap_or((0, 0));
+                    let (down, up) = match &self.last_net {
+                        Some((i, r0, t0, at)) if *i == ifname => {
+                            let dt = now.duration_since(*at).as_secs_f64().max(0.001);
+                            (rx.saturating_sub(*r0) as f64 / dt, tx.saturating_sub(*t0) as f64 / dt)
+                        }
+                        _ => (0.0, 0.0),
+                    };
+                    self.last_net = Some((ifname.clone(), rx, tx, now));
+                    let essid = if wireless { self.essid.clone().unwrap_or_default() } else { String::new() };
+                    let name = if essid.is_empty() { ifname.clone() } else { essid.clone() };
+                    let b = crate::system::bytes;
+                    fill(
+                        &self.format,
+                        &[
+                            ("name", name),
+                            ("essid", essid),
+                            ("ifname", ifname),
+                            ("state", state),
+                            ("signal", signal.map(|s| s.to_string()).unwrap_or_default()),
+                            ("down", format!("{}/s", b(down))),
+                            ("up", format!("{}/s", b(up))),
+                            ("down-total", b(rx as f64)),
+                            ("up-total", b(tx as f64)),
+                        ],
+                    )
                 }
                 None => {
                     self.set_icon("network-offline");
