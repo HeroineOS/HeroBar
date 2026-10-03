@@ -10,8 +10,9 @@ use it with HeroWM, or in your own sway/Hyprland/KDE rice.
 - **Light:** 2.4 MB of its own memory (about 16 MB RSS with shared libraries), 0% CPU
   with a clock ticking every second, 1.6 MB binary. Measured on Wayland (sway).
 - **Configured in TOML**, in the same style as the HeroWM compositor's config.
-- **Taskbar** with pinned apps and open windows: from HeroWM's IPC, or the
-  wlr-foreign-toplevel-management protocol (sway, Hyprland, labwc, river, Wayfire).
+- **Taskbar and workspaces**: from HeroWM's IPC, sway's IPC, or (windows only) the
+  wlr-foreign-toplevel-management protocol (Hyprland, labwc, river, Wayfire).
+- **Groups, drawers and spacers** to arrange modules without clutter.
 - **Icons** that follow the theme (battery level, Wi-Fi/wired, volume...), app icons
   from your icon theme.
 - **Islands** (optional): each module on its own background, sharp, rounded or pill,
@@ -24,7 +25,7 @@ Debian packages for amd64 and arm64 are attached to the
 also install on testing):
 
 ```sh
-sudo apt install ./herobar_0.1.5-1_arm64.deb
+sudo apt install ./herobar_0.1.6-1_arm64.deb
 herobar &
 ```
 
@@ -43,7 +44,14 @@ itself; a config with errors is reported and ignored until fixed). Appearance ed
 | `network` | interface of the default route | `{ifname}` `{state}` |
 | `volume` | default output volume, via wpctl or pactl (hidden without audio) | `{volume}` |
 | `taskbar` | pinned apps and open windows | (see below) |
-| `custom/<name>` | fixed `text`, or the first line `exec` prints | |
+| `workspaces` | the monitor's workspaces; click to switch, wheel to step | |
+| `spacer` | fixed space, or `expand = true` to share free space (centers modules); `style = "line"` / `"dots"` | |
+| `group/<name>` | `modules = [...]` shown together on one background; `drawer = true` collapses them behind an icon | |
+| `custom/<name>` | fixed `text`, or the first line `exec` prints (`{"text": .., "icon": ..}` sets the icon) | |
+
+Any kind can be used more than once with its own settings: `cpu/big`, `spacer/2`...
+Sizes: `[style]` `module-padding`, `module-margin`, `icon-size`, `font-size`; per module
+`padding`, `icon-size`, `font-size`.
 
 Any module can have `interval = <seconds>`, `on-click` and `icon` (a built-in icon, an
 icon theme name or an image path; `""` for none). Built-in modules have icons by
@@ -60,6 +68,7 @@ style = "icons"          # one button per app; "icons-titles": one per window, w
 pinned = ["foot", "firefox-esr"]   # .desktop file names
 max-width = 600          # the most room it takes; buttons shrink to fit
 fixed-width = false      # true: always max-width, so other modules never move
+workspace = "all"        # "current": only the current workspace's windows
 ```
 
 ## Configuration

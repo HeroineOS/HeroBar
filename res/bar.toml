@@ -24,12 +24,12 @@ islands = false
 island-style = "rounded"   # "sharp", "rounded" or "pill"
 
 # Modules, from the screen edge inwards for left/right. Each name refers to a
-# [modules.<name>] section below. Built-in kinds: clock, cpu, memory, battery,
-# network, volume, taskbar. "custom/<anything>" runs a command or shows fixed
-# text.
-modules-left = ["custom/menu", "taskbar"]
+# [modules.<name>] section below. Kinds: clock, cpu, memory, battery, network,
+# volume, taskbar, workspaces, spacer, group/<name>, custom/<name>.
+# For more than one of a kind, add "/<anything>": "cpu/big", "spacer/2"...
+modules-left = ["custom/menu", "workspaces", "taskbar"]
 modules-center = ["clock"]
-modules-right = ["volume", "network", "cpu", "memory", "battery"]
+modules-right = ["volume", "network", "group/system", "battery"]
 
 # ---------------------------------------------------------
 
@@ -41,6 +41,9 @@ modules-right = ["volume", "network", "cpu", "memory", "battery"]
 # hover = "#2a2a3a"      # Background of a module under the mouse, if it's clickable
 # font = "Inter"
 # font-size = 14
+# icon-size = 16          # Default: font size + 2
+# module-padding = 10     # Space left and right inside each module
+# module-margin = 3       # Space above and below module backgrounds (islands, hover)
 
 # ---------------------------------------------------------
 
@@ -57,6 +60,9 @@ modules-right = ["volume", "network", "cpu", "memory", "battery"]
 #                              # volume-muted), an icon theme name ("firefox-esr")
 #                              # or an image path. "" for none. Battery, network
 #                              # and volume change theirs with their state.
+#   padding = 6                # Size overrides for this module only
+#   icon-size = 18
+#   font-size = 12
 #
 # Commands run through "sh -c", like the compositor's run-command action.
 
@@ -96,6 +102,12 @@ format = "{volume}%"
 interval = 5
 on-click = "pavucontrol"
 
+# Workspaces of the bar's monitor. Click to switch; the wheel steps through.
+# From HeroWM's IPC or sway's.
+[modules.workspaces]
+show = "all"             # "all", or "occupied" (with windows, plus the shown one)
+# output = "eDP-1"       # Whose workspaces (default: the active monitor)
+
 # Open windows and pinned apps. Click: open/focus (again: next window of the
 # app); middle click: close the window.
 # Window list from HeroWM's IPC, or wlr-foreign-toplevel-management (sway,
@@ -108,9 +120,28 @@ pinned = ["foot", "firefox-esr", "heroappearance"]   # .desktop file names; miss
 max-width = 600          # The most room it takes; buttons shrink to fit
 fixed-width = false      # true: always max-width, so other modules never move
 button-width = 180       # icons-titles: the widest a window button gets
+workspace = "all"        # "current": only windows on the current workspace
+
+# Groups show their modules together on one background (one island), e.g.
+# CPU and memory as one. drawer = true collapses a group to its icon; a
+# click opens it in place. Groups can't contain groups.
+[modules."group/system"]
+modules = ["cpu", "memory"]
+# drawer = true
+# icon = "settings"
+
+# Spacers: fixed space, or expand = true to share the section's free space
+# with its edge, which centers what's between them. E.g.
+# modules-left = ["custom/menu", "spacer", "taskbar"] centers the taskbar
+# between the menu and the clock's section.
+#   [modules.spacer]
+#   width = 12
+#   expand = false
+#   style = "none"       # "none", "line" or "dots"
 
 # Custom modules show fixed text (`text`), or the first line a command
-# prints (`exec`, run every `interval` seconds), e.g.:
+# prints (`exec`, run every `interval` seconds). A line like
+# {"text": "21°", "icon": "weather-clear"} sets the icon too. E.g.:
 #   [modules."custom/uptime"]
 #   icon = "clock"
 #   exec = "uptime -p"
