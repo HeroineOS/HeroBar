@@ -5,6 +5,7 @@
 
 mod apps;
 mod config;
+mod fade;
 mod fit;
 mod modules;
 mod popups;
@@ -25,7 +26,7 @@ use heroui::fltk::enums::{Align, Color, FrameType};
 use heroui::fltk::frame::Frame;
 use heroui::fltk::group::Flex;
 use heroui::fltk::prelude::*;
-use heroui::hover::is_hovered;
+use heroui::hover::hover_amount;
 use heroui::prelude::*;
 
 use modules::{Kind, Module};
@@ -47,6 +48,79 @@ struct Bar {
     desktop: taskbar::Desktop,
     /// Audio, network, Bluetooth and their popups.
     sys: popups::Sys,
+    /// When each module refreshes next.
+    due: Vec<std::time::Instant>,
+    /// Modules shrinking away before a rebuild (by name).
+    leaving: HashSet<String>,
+    /// A changed config waiting for the leaving modules to shrink.
+    pending: Option<config::Config>,
+    /// Background watchers started with the bar: (desktop, audio, network).
+    workers: (bool, bool, bool),
+    /// The first heartbeat happened: layout changes animate from now on.
+    started: bool,
+}
+
+/// Modules from `config`, reusing `old` ones with the same name and
+/// settings (their state carries over: CPU counters, last output).
+/// Returns (modules, group of each, left, center, right).
+type Built = (Vec<Module>, Vec<Option<usize>>, Vec<usize>, Vec<usize>, Vec<usize>);
+
+fn build_modules(config: &config::Config, mut old: Vec<Module>) -> Built {
+    let mut modules = Vec::new();
+    let mut parent = Vec::new();
+    let mut make = |name: &str| {
+        let cfg = config.modules.get(name);
+        let same = |m: &Module| m.name == name && m.cfg == cfg.cloned().unwrap_or_default();
+        match old.iter().position(same) {
+            Some(k) => old.swap_remove(k),
+            None => Module::new(name, cfg),
+        }
+    };
+    let mut section = |names: &[String]| {
+        let mut idx = Vec::new();
+        for name in names {
+            modules.push(make(name));
+            parent.push(None);
+            let g = modules.len() - 1;
+            idx.push(g);
+            // A group's modules follow it.
+            if modules[g].kind == Kind::Group {
+                let members = config.modules.get(name).and_then(|c| c.modules.clone()).unwrap_or_default();
+                for member in members {
+                    modules.push(make(&member));
+                    parent.push(Some(g));
+                }
+            }
+        }
+        idx
+    };
+    let left = section(&config.bar.modules_left);
+    let center = section(&config.bar.modules_center);
+    let right = section(&config.bar.modules_right);
+    (modules, parent, left, center, right)
+}
+
+/// Which background watchers `modules` need: (desktop, audio, network).
+fn workers_for(modules: &[Module]) -> (bool, bool, bool) {
+    (
+        modules.iter().any(|m| matches!(m.kind, Kind::Taskbar | Kind::Workspaces)),
+        modules.iter().any(|m| m.kind == Kind::Volume && m.exec.is_none()) && system::have("pactl"),
+        modules.iter().any(|m| m.kind == Kind::Network) && system::have("nmcli"),
+    )
+}
+
+/// Changes the window itself (or its watchers) can't follow live.
+fn needs_restart(old: &config::Config, new: &config::Config, running: (bool, bool, bool), wanted: (bool, bool, bool)) -> bool {
+    let (a, b) = (&old.bar, &new.bar);
+    let output = |c: &config::Config| c.modules.iter().find(|(n, _)| n.starts_with("workspaces")).and_then(|(_, m)| m.output.clone());
+    a.position != b.position
+        || a.height != b.height
+        || a.reserve_space != b.reserve_space
+        || a.islands != b.islands
+        || (wanted.0 && !running.0)
+        || (wanted.1 && !running.1)
+        || (wanted.2 && !running.2)
+        || output(old) != output(new)
 }
 
 #[derive(Clone)]
@@ -70,34 +144,63 @@ enum Msg {
     Drawer(usize),
     /// Volume, network and Bluetooth popups and state.
     Sys(popups::SysMsg),
+    /// Once a second: refresh what's due, check the config.
+    Heartbeat,
+    /// Apply the pending config (removed modules have shrunk away).
+    Rebuild,
 }
 
 impl Bar {
     fn new(config: config::Config, watch: reload::Watch) -> Bar {
-        let mut modules = Vec::new();
-        let mut parent = Vec::new();
-        let mut section = |names: &[String]| {
-            let mut idx = Vec::new();
-            for name in names {
-                let cfg = config.modules.get(name);
-                modules.push(Module::new(name, cfg));
-                parent.push(None);
-                let g = modules.len() - 1;
-                idx.push(g);
-                // A group's modules follow it.
-                if modules[g].kind == Kind::Group {
-                    for member in cfg.and_then(|c| c.modules.as_ref()).into_iter().flatten() {
-                        modules.push(Module::new(member, config.modules.get(member)));
-                        parent.push(Some(g));
-                    }
-                }
-            }
-            idx
-        };
-        let left = section(&config.bar.modules_left);
-        let center = section(&config.bar.modules_center);
-        let right = section(&config.bar.modules_right);
-        Bar { config, watch, modules, left, center, right, parent, open: HashSet::new(), desktop: taskbar::Desktop::default(), sys: popups::Sys::default() }
+        let (modules, parent, left, center, right) = build_modules(&config, Vec::new());
+        let now = std::time::Instant::now();
+        Bar {
+            due: vec![now; modules.len()],
+            workers: workers_for(&modules),
+            config,
+            watch,
+            modules,
+            left,
+            center,
+            right,
+            parent,
+            open: HashSet::new(),
+            desktop: taskbar::Desktop::default(),
+            sys: popups::Sys::default(),
+            leaving: HashSet::new(),
+            pending: None,
+            started: false,
+        }
+    }
+
+    /// Switches to `config` in place: same window, new modules (state of
+    /// unchanged ones kept), sizes animating from the old layout.
+    fn apply_config(&mut self, config: config::Config) -> Task<Msg> {
+        let old = std::mem::take(&mut self.modules);
+        let (modules, parent, left, center, right) = build_modules(&config, old);
+        let now = std::time::Instant::now();
+        self.due = vec![now; modules.len()];
+        (self.modules, self.parent, self.left, self.center, self.right) = (modules, parent, left, center, right);
+        self.config = config;
+        self.open.clear();
+        self.sys.open = None;
+        self.leaving.clear();
+        set_globals(&self.config);
+        heroui::theme::set_current(self.theme());
+        // New Bluetooth/command modules show something right away.
+        let first: Vec<usize> = (0..self.modules.len())
+            .filter(|&i| (self.modules[i].exec.is_some() && self.modules[i].text.is_empty()) || self.modules[i].kind == Kind::Bluetooth)
+            .collect();
+        let mut tasks: Vec<Task<Msg>> = first.into_iter().map(|i| self.update(Msg::Tick(i))).collect();
+        // Shared state reaches the new modules.
+        tasks.push(self.update_sys(popups::SysMsg::Refresh));
+        tasks.push(Task::rebuild());
+        Task::batch(tasks)
+    }
+
+    /// True if module `i` is hidden: in a closed drawer, or on its way out.
+    fn gone(&self, i: usize) -> bool {
+        self.hidden(i) || self.leaving.contains(&self.modules[i].name)
     }
 
     /// The modules in group `g`.
@@ -117,8 +220,18 @@ impl Bar {
         })
     }
 
-    /// The view of module `i` (any kind).
+    /// The view of module `i` (any kind), named for `fit`.
     fn module_element(&self, i: usize, center: bool) -> Element<Bar, Msg> {
+        let el = self.module_element_(i, center);
+        let name = self.modules[i].name.clone();
+        Element::new(move |ctx| {
+            let w = el.build(ctx);
+            fit::name(&w, &name);
+            w
+        })
+    }
+
+    fn module_element_(&self, i: usize, center: bool) -> Element<Bar, Msg> {
         let m = &self.modules[i];
         let in_group = self.parent[i].is_some();
         match m.kind {
@@ -189,20 +302,59 @@ impl App for Bar {
                     self.open.insert(g);
                 }
             }
+            Msg::Heartbeat => {
+                if !self.started {
+                    self.started = true;
+                    fit::animate(true);
+                }
+                let now = std::time::Instant::now();
+                let due: Vec<usize> = (0..self.modules.len())
+                    .filter(|&i| self.modules[i].is_dynamic() && self.due[i] <= now)
+                    .collect();
+                let mut tasks = Vec::new();
+                for i in due {
+                    let secs = self.modules[i].interval.max(1.0);
+                    // A little early, so 1-second clocks don't skip.
+                    self.due[i] = now + Duration::from_secs_f64(secs - 0.05);
+                    tasks.push(self.update(Msg::Tick(i)));
+                }
+                tasks.push(self.update(Msg::CheckReload));
+                return Task::batch(tasks);
+            }
             Msg::CheckReload => {
-                if self.watch.changed() {
-                    // Don't trade a working bar for a broken config.
-                    let broken = self.watch.config.as_ref().and_then(|p| {
-                        let text = std::fs::read_to_string(p).ok()?;
-                        config::parse(&text).err().map(|e| format!("{}: {e}", p.display()))
-                    });
-                    match broken {
-                        Some(e) => eprintln!("herobar: not reloading, the config has errors:\n{e}"),
-                        None => {
-                            let e = reload::restart();
-                            eprintln!("herobar: reload failed: {e}");
-                        }
+                if !self.watch.changed() {
+                    return Task::none();
+                }
+                // Don't trade a working bar for a broken config.
+                let Some(p) = self.watch.config.clone() else { return Task::none() };
+                let new = match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|t| config::parse(&t)) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("herobar: not reloading, {}: {e}", p.display());
+                        return Task::none();
                     }
+                };
+                let (wanted, _, _, _, _) = build_modules(&new, Vec::new());
+                if needs_restart(&self.config, &new, self.workers, workers_for(&wanted)) {
+                    let e = reload::restart();
+                    eprintln!("herobar: reload failed: {e}");
+                    return Task::none();
+                }
+                // Removed modules shrink away first, then the bar is rebuilt.
+                let names: HashSet<String> = wanted.iter().map(|m| m.name.clone()).collect();
+                self.leaving = self.modules.iter().map(|m| m.name.clone()).filter(|n| !names.contains(n)).collect();
+                if self.leaving.is_empty() || !heroui::anim::enabled() {
+                    return self.apply_config(new);
+                }
+                self.pending = Some(new);
+                return Task::perform(|| {
+                    std::thread::sleep(Duration::from_millis(200));
+                    Msg::Rebuild
+                });
+            }
+            Msg::Rebuild => {
+                if let Some(c) = self.pending.take() {
+                    return self.apply_config(c);
                 }
             }
         }
@@ -210,6 +362,9 @@ impl App for Bar {
     }
 
     fn view(&self) -> Element<Self, Msg> {
+        // A new view (also after a config change): widths carry over by
+        // module name.
+        fit::forget_widgets();
         let section = |which: Section, idx: &[usize]| {
             let center = which == Section::Center;
             let mut items: Vec<Element<Bar, Msg>> = idx.iter().map(|&i| self.module_element(i, center)).collect();
@@ -256,23 +411,20 @@ impl App for Bar {
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
-        let desktop = self.modules.iter().any(|m| matches!(m.kind, Kind::Taskbar | Kind::Workspaces));
         // The monitor whose workspaces to show, if one is configured.
         let output = self.modules.iter().find(|m| m.kind == Kind::Workspaces).and_then(|m| m.cfg.output.clone());
-        self.modules
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.is_dynamic())
-            .map(|(i, m)| Subscription::every(Duration::from_secs_f64(m.interval), Msg::Tick(i)))
-            .chain([Subscription::every(Duration::from_secs(1), Msg::CheckReload)])
+        // One timer for everything (it survives config changes); modules
+        // refresh on it when due.
+        let (desktop, audio, net) = self.workers;
+        std::iter::once(Subscription::every(Duration::from_secs(1), Msg::Heartbeat))
             .chain(desktop.then(|| {
                 Subscription::worker(move |tx: heroui::Sender<Msg>| windows::run(output, move |u| tx.send(Msg::Windows(u))))
             }))
             // Sound server and NetworkManager events, instead of polling.
-            .chain((self.modules.iter().any(|m| m.kind == Kind::Volume && m.exec.is_none()) && system::have("pactl")).then(|| {
+            .chain(audio.then(|| {
                 Subscription::worker(|tx: heroui::Sender<Msg>| system::audio_watch(move || tx.send(Msg::Sys(popups::SysMsg::AudioChanged))))
             }))
-            .chain((self.modules.iter().any(|m| m.kind == Kind::Network) && system::have("nmcli")).then(|| {
+            .chain(net.then(|| {
                 Subscription::worker(|tx: heroui::Sender<Msg>| system::net_watch(move || tx.send(Msg::Sys(popups::SysMsg::NetChanged))))
             }))
             .collect()
@@ -354,6 +506,35 @@ thread_local! {
     static SIZES: Cell<Sizes> = const { Cell::new(Sizes { padding: 10, margin: 3, icon: None }) };
 }
 
+/// Island style and sizes from the config, read while drawing.
+fn set_globals(config: &config::Config) {
+    ISLANDS.with(|c| c.set(config.bar.islands.then_some(config.bar.island_style)));
+    let st = &config.style;
+    let height = config.bar.height.max(1);
+    SIZES.with(|c| {
+        c.set(Sizes {
+            padding: st.module_padding.unwrap_or(10).max(0),
+            margin: st.module_margin.unwrap_or(3).min(height / 2 - 4).max(0),
+            icon: st.icon_size,
+        })
+    });
+}
+
+/// True if modules sit on islands.
+pub fn islands_on() -> bool {
+    ISLANDS.with(Cell::get).is_some()
+}
+
+/// The color of an island (what a hover blends from).
+pub fn island_color() -> Color {
+    let t = heroui::theme::current();
+    if heroui::is_transparent() {
+        t.background
+    } else {
+        t.surface
+    }
+}
+
 /// Space above and below module backgrounds.
 pub fn margin() -> i32 {
     SIZES.with(Cell::get).margin
@@ -431,13 +612,26 @@ fn module_width(icon: &str, text: &str, custom: bool, sz: ModSizes) -> i32 {
 }
 
 /// Paints a module: island (unless in a group), hover, icon, text.
-fn paint_module(w: &dyn WidgetExt, icon: &str, text: &str, hovered: bool, in_group: bool, sz: ModSizes) {
+fn paint_module(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_group: bool, sz: ModSizes) {
+    // While it grows or shrinks, nothing spills onto its neighbors.
+    draw::push_clip(w.x(), w.y(), w.w(), w.h());
+    paint_module_(w, icon, text, hovered, in_group, sz);
+    draw::pop_clip();
+}
+
+fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_group: bool, sz: ModSizes) {
     let t = heroui::theme::current();
     if !in_group {
         island(w.x(), w.y(), w.w(), w.h());
     }
-    if hovered {
-        draw::set_draw_color(t.surface_alt);
+    if hovered > 0.0 {
+        // Fades in and out (HeroUI's hover_amount): blend from what's under.
+        let under = if ISLANDS.with(Cell::get).is_some() {
+            if heroui::is_transparent() { t.background } else { t.surface }
+        } else {
+            t.background
+        };
+        draw::set_draw_color(heroui::widgets::mix(under, t.surface_alt, hovered));
         let m = margin();
         let h = w.h() - 2 * m;
         let r = if ISLANDS.with(Cell::get).is_some() { island_radius(h) } else { t.radius.min(h / 2) };
@@ -477,7 +671,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
         let paint = {
             let shown = shown.clone();
             let sizes = sizes.clone();
-            move |w: &mut dyn WidgetExt, hovered: bool| {
+            move |w: &mut dyn WidgetExt, hovered: f32| {
                 let (icon, text) = &*shown.borrow();
                 paint_module(w, icon, text, hovered, in_group, sizes.get());
             }
@@ -486,7 +680,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
         // hover); the others are plain frames.
         let widget = if click == Click::Popup {
             let mut b = press_button(move |b| {
-                let hovered = is_hovered(b) || b.value();
+                let hovered = if b.value() { 1.0 } else { hover_amount(b) };
                 paint(b, hovered)
             });
             let emit = ctx.emitter();
@@ -498,7 +692,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
             b.as_base_widget()
         } else if click == Click::Command {
             let mut b = custom_button(move |b| {
-                let hovered = is_hovered(b) || b.value();
+                let hovered = if b.value() { 1.0 } else { hover_amount(b) };
                 paint(b, hovered)
             });
             let emit = ctx.emitter();
@@ -507,7 +701,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
         } else {
             let mut f = Frame::default();
             f.set_frame(FrameType::NoBox);
-            f.draw(move |f| paint(f, false));
+            f.draw(move |f| paint(f, 0.0));
             f.as_base_widget()
         };
         let mut w = widget.clone();
@@ -515,7 +709,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
         let was_hidden = Cell::new(false);
         ctx.bind(move |bar: &Bar| {
             let m = &bar.modules[i];
-            let hidden = bar.hidden(i);
+            let hidden = bar.gone(i);
             // The first run always sizes the module (last_width starts at
             // -1), so one with nothing to show takes no space instead of a
             // share of the bar.
@@ -617,7 +811,7 @@ fn drawer_toggle(g: usize, icon: String) -> Element<Bar, Msg> {
         let mut b = custom_button({
             let open = open.clone();
             move |b| {
-                let hovered = is_hovered(b) || b.value() || open.get();
+                let hovered = if b.value() || open.get() { 1.0 } else { hover_amount(b) };
                 let sz = ModSizes { padding: sizes.padding, icon: sizes.icon, font: None };
                 paint_module(b, &icon, "", hovered, true, sz);
             }
@@ -628,6 +822,10 @@ fn drawer_toggle(g: usize, icon: String) -> Element<Bar, Msg> {
         let first = Cell::new(true);
         ctx.bind(move |bar: &Bar| {
             let is_open = bar.open.contains(&g);
+            if bar.gone(g) {
+                fit::set_width(&mut w, 0);
+                return;
+            }
             if first.replace(false) {
                 let t = heroui::theme::current();
                 let width = sizes.icon.unwrap_or(t.font_size + 2) + 2 * sizes.padding;
@@ -703,17 +901,7 @@ fn main() {
         config::Position::Bottom => Edge::Bottom,
     };
     let height = config.bar.height.max(1);
-    if config.bar.islands {
-        ISLANDS.with(|c| c.set(Some(config.bar.island_style)));
-    }
-    let st = &config.style;
-    SIZES.with(|c| {
-        c.set(Sizes {
-            padding: st.module_padding.unwrap_or(10).max(0),
-            margin: st.module_margin.unwrap_or(3).min(height / 2 - 4).max(0),
-            icon: st.icon_size,
-        })
-    });
+    set_globals(&config);
     let mut settings = Settings::panel("herobar", edge, height).class("herobar").transparent(config.bar.islands);
     settings.reserve = Some((edge, if config.bar.reserve_space { height } else { 0 }));
     if let Err(e) = heroui::run(Bar::new(config, watch), settings) {

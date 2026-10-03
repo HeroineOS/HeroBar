@@ -99,6 +99,8 @@ p=$(pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | awk '/Volume/ { gsub("%",
 
 /// A module's state; `text` is what the bar shows ("" hides the module).
 pub struct Module {
+    /// Its name in the config ("cpu", "custom/menu").
+    pub name: String,
     pub kind: Kind,
     pub text: String,
     /// Icon shown before the text ("" = none).
@@ -137,6 +139,7 @@ impl Module {
         let cfg = cfg.unwrap_or(&empty);
         let icon_cfg = cfg.icon.clone();
         let mut m = Module {
+            name: name.to_owned(),
             kind,
             text: String::new(),
             icon: icon_cfg.clone().unwrap_or_else(|| kind.default_icon().to_owned()),

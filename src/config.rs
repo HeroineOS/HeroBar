@@ -89,7 +89,7 @@ pub struct Style {
 
 /// One `[modules.<name>]` section. Which keys matter depends on the kind,
 /// which comes from the name ("clock", "cpu", "custom/...").
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Module {
     pub format: Option<String>,
@@ -141,14 +141,14 @@ pub struct Module {
 }
 
 /// A string is shorthand for `{ action = "run-command", arg = "..." }`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum Action {
     Command(String),
     Table(ActionTable),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionTable {
     pub action: String,

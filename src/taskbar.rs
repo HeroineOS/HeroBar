@@ -250,7 +250,7 @@ struct View {
     items: Vec<Item>,
     style: TaskStyle,
     button_width: i32,
-    hover: Option<usize>,
+    hover: crate::fade::HoverFade,
     pressed: Option<(usize, i32)>,
 }
 
@@ -274,7 +274,7 @@ impl View {
 
 pub fn view(i: usize) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let v = Rc::new(RefCell::new(View { items: vec![], style: TaskStyle::Icons, button_width: 180, hover: None, pressed: None }));
+        let v = Rc::new(RefCell::new(View { items: vec![], style: TaskStyle::Icons, button_width: 180, hover: Default::default(), pressed: None }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
         {
@@ -290,16 +290,11 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
                 match ev {
                     Event::Enter | Event::Move => {
                         let h = s.at(f.x(), f.w(), px);
-                        if s.hover != h {
-                            s.hover = h;
-                            repaint(f);
-                        }
+                        s.hover.set(h, &f.as_base_widget());
                         true
                     }
                     Event::Leave => {
-                        if s.hover.take().is_some() {
-                            repaint(f);
-                        }
+                        s.hover.set(None, &f.as_base_widget());
                         true
                     }
                     Event::Push => {
@@ -330,7 +325,7 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
         let last_room = Cell::new(None);
         ctx.bind(move |bar: &Bar| {
             let Some(cfg) = bar.modules[i].taskbar.as_ref() else { return };
-            let items = items(cfg, &bar.desktop.windows, bar.desktop.current_workspace());
+            let items = if bar.gone(i) { vec![] } else { items(cfg, &bar.desktop.windows, bar.desktop.current_workspace()) };
             // Runs after every update; only the window list or the room
             // the bar leaves (screen size) make it do anything.
             let room = crate::fit::room(&w);
@@ -347,7 +342,7 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
             s.items = items;
             s.style = cfg.style;
             s.button_width = cfg.button_width;
-            s.hover = None;
+            s.hover.clear();
             drop(s);
             if width != last_width.replace(width) {
                 crate::fit::set_width(&mut w, width);
@@ -369,10 +364,12 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32) {
     draw::set_font(t.font(), t.font_size - 1);
     for (idx, (item, &bw)) in v.items.iter().zip(&v.layout(w)).enumerate() {
         let running = !item.windows.is_empty();
+        let under = if crate::islands_on() { crate::island_color() } else { t.background };
+        let hover = mix(under, t.surface_alt, v.hover.amount(idx));
         let bg = if item.focused {
             Some(mix(t.surface_alt, t.accent, 0.18))
-        } else if v.hover == Some(idx) {
-            Some(t.surface_alt)
+        } else if v.hover.amount(idx) > 0.0 {
+            Some(hover)
         } else {
             None
         };

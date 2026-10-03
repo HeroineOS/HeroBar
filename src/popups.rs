@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use heroui::fltk::draw;
 use heroui::fltk::enums::Align;
 use heroui::fltk::prelude::*;
-use heroui::hover::is_hovered;
+use heroui::hover::hover_amount;
 use heroui::prelude::*;
 
 use crate::modules::Kind;
@@ -53,6 +53,9 @@ pub struct Sys {
 
 #[derive(Clone, Debug)]
 pub enum SysMsg {
+    /// Show the current audio/network/Bluetooth state in all modules
+    /// (after a rebuild).
+    Refresh,
     Open(usize),
     Closed(usize),
     /// Run a module's "advanced" command (pavucontrol...) and close.
@@ -106,6 +109,15 @@ impl Bar {
     pub fn update_sys(&mut self, msg: SysMsg) -> Task<Msg> {
         let s = &mut self.sys;
         match msg {
+            SysMsg::Refresh => {
+                self.show_audio();
+                self.show_net();
+                self.show_bt();
+            }
+            SysMsg::Open(i) if s.open == Some(i) => {
+                // A second click on the module closes it.
+                s.open = None;
+            }
             SysMsg::Open(i) => {
                 // The click that closed it (outside the popup, on its
                 // module) shouldn't open it again.
@@ -376,9 +388,10 @@ fn item(look: impl Fn(&Bar) -> Look + 'static, msg: SysMsg) -> Element<Bar, Msg>
             move |b| {
                 let t = heroui::theme::current();
                 let l = cur.borrow();
-                if is_hovered(b) || b.value() {
-                    draw::set_draw_color(t.surface_alt);
-                    draw::draw_rounded_rectf(b.x(), b.y(), b.w(), b.h(), t.radius.min(8));
+                let a = if b.value() { 1.0 } else { hover_amount(b) };
+                if a > 0.0 {
+                    draw::set_draw_color(heroui::widgets::mix(t.background, t.surface_alt, a));
+                    draw::draw_rounded_rectf(b.x(), b.y(), b.w(), b.h(), t.radius.min(10));
                 }
                 let (x, y, w, h) = (b.x() + 8, b.y(), b.w() - 16, b.h());
                 let fg = if l.active { t.accent } else { t.text };
@@ -455,8 +468,9 @@ fn mute_button(input: bool, icon: impl Fn(&Bar) -> String + 'static) -> Element<
             let cur = cur.clone();
             move |b| {
                 let t = heroui::theme::current();
-                if is_hovered(b) || b.value() {
-                    draw::set_draw_color(t.surface_alt);
+                let a = if b.value() { 1.0 } else { hover_amount(b) };
+                if a > 0.0 {
+                    draw::set_draw_color(heroui::widgets::mix(t.background, t.surface_alt, a));
                     draw::draw_rounded_rectf(b.x(), b.y(), b.w(), b.h(), t.radius.min(b.h() / 2));
                 }
                 heroui::icons::draw(&cur.borrow(), b.x() + (b.w() - 20) / 2, b.y() + (b.h() - 20) / 2, 20, t.text);

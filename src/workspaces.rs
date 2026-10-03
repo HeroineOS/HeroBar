@@ -31,7 +31,7 @@ pub fn shown(all: &[Ws], occupied_only: bool) -> Vec<Ws> {
 struct View {
     list: Vec<Ws>,
     font: i32,
-    hover: Option<usize>,
+    hover: crate::fade::HoverFade,
     pressed: Option<usize>,
 }
 
@@ -58,12 +58,16 @@ impl View {
 
 pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let v = Rc::new(RefCell::new(View { list: vec![], font: 14, hover: None, pressed: None }));
+        let v = Rc::new(RefCell::new(View { list: vec![], font: 14, hover: Default::default(), pressed: None }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
         {
             let v = v.clone();
-            f.draw(move |f| paint(&v.borrow(), f.x(), f.y(), f.w(), f.h(), in_group));
+            f.draw(move |f| {
+                draw::push_clip(f.x(), f.y(), f.w(), f.h());
+                paint(&v.borrow(), f.x(), f.y(), f.w(), f.h(), in_group);
+                draw::pop_clip();
+            });
         }
         let emit = ctx.emitter();
         {
@@ -74,16 +78,11 @@ pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Ms
                 match ev {
                     Event::Enter | Event::Move => {
                         let h = s.at(f.x(), f.h(), px);
-                        if s.hover != h {
-                            s.hover = h;
-                            repaint(f);
-                        }
+                        s.hover.set(h, &f.as_base_widget());
                         true
                     }
                     Event::Leave => {
-                        if s.hover.take().is_some() {
-                            repaint(f);
-                        }
+                        s.hover.set(None, &f.as_base_widget());
                         true
                     }
                     Event::Push => {
@@ -119,14 +118,14 @@ pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Ms
         ctx.bind(move |bar: &Bar| {
             let m = &bar.modules[i];
             let occupied_only = m.cfg.show.as_deref() == Some("occupied");
-            let list = if bar.hidden(i) { vec![] } else { shown(&bar.desktop.workspaces, occupied_only) };
+            let list = if bar.gone(i) { vec![] } else { shown(&bar.desktop.workspaces, occupied_only) };
             let mut s = v.borrow_mut();
             if s.list == list && last_width.get() >= 0 {
                 return;
             }
             s.list = list;
             s.font = font_size.unwrap_or_else(|| heroui::theme::current().font_size);
-            s.hover = None;
+            s.hover.clear();
             let ws = s.widths(w.h().max(bar.config.bar.height));
             let width = if ws.is_empty() { 0 } else { ws.iter().sum::<i32>() + GAP * (ws.len() as i32 - 1) + 2 * GAP };
             drop(s);
@@ -153,8 +152,9 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32, in_group: bool) {
         if ws.active {
             draw::set_draw_color(t.accent);
             draw::draw_rounded_rectf(bx, by, bw, bh, r);
-        } else if v.hover == Some(idx) {
-            draw::set_draw_color(t.surface_alt);
+        } else if v.hover.amount(idx) > 0.0 {
+            let under = if in_group || crate::islands_on() { crate::island_color() } else { t.background };
+            draw::set_draw_color(mix(under, t.surface_alt, v.hover.amount(idx)));
             draw::draw_rounded_rectf(bx, by, bw, bh, r);
         }
         draw::set_draw_color(if ws.active {
