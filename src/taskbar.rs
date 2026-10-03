@@ -22,9 +22,24 @@ use heroui::prelude::*;
 use heroui::widgets::{mix, repaint};
 
 use crate::apps::App;
-use crate::config::{self, TaskShow, TaskStyle};
-use crate::windows::{Cmd, Control, Win};
-use crate::{Bar, Msg, Section};
+use crate::config;
+use crate::windows::{Cmd, Control, Win, Ws};
+use crate::{Bar, Msg};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TaskShow {
+    Running,
+    Pinned,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStyle {
+    #[default]
+    Icons,
+    IconsTitles,
+}
 
 pub struct Config {
     pub show: TaskShow,
@@ -33,6 +48,8 @@ pub struct Config {
     pub max_width: i32,
     pub fixed_width: bool,
     pub button_width: i32,
+    /// Only windows on the current workspace.
+    pub current_workspace: bool,
 }
 
 impl Config {
@@ -40,8 +57,16 @@ impl Config {
         let empty = config::Module::default();
         let c = cfg.unwrap_or(&empty);
         Config {
-            show: c.show.unwrap_or_default(),
-            style: c.style.unwrap_or_default(),
+            show: match c.show.as_deref() {
+                Some("running") => TaskShow::Running,
+                Some("pinned") => TaskShow::Pinned,
+                _ => TaskShow::Both,
+            },
+            style: match c.style.as_deref() {
+                Some("icons-titles") => TaskStyle::IconsTitles,
+                _ => TaskStyle::Icons,
+            },
+            current_workspace: c.workspace.as_deref() == Some("current"),
             // Pinned apps that aren't installed are left out.
             pinned: c.pinned.iter().flatten().filter_map(|id| crate::apps::by_id(id)).collect(),
             max_width: c.max_width.unwrap_or(600).max(40),
@@ -51,10 +76,19 @@ impl Config {
     }
 }
 
+/// What the compositor tells about windows and workspaces.
 #[derive(Default)]
-pub struct Taskbar {
+pub struct Desktop {
     pub windows: Vec<Win>,
+    pub workspaces: Vec<Ws>,
     pub control: Option<Control>,
+}
+
+impl Desktop {
+    /// The workspace shown on the bar's monitor, if known.
+    pub fn current_workspace(&self) -> Option<u64> {
+        self.workspaces.iter().find(|w| w.active).map(|w| w.id)
+    }
 }
 
 /// One button.
@@ -85,7 +119,17 @@ fn icon_of(w: &Win) -> String {
 
 /// The buttons, in order: pinned apps first, then other running apps by
 /// when their first window opened.
-pub fn items(cfg: &Config, windows: &[Win]) -> Vec<Item> {
+pub fn items(cfg: &Config, windows: &[Win], current: Option<u64>) -> Vec<Item> {
+    // Windows on other workspaces are left out (pinned apps stay); when
+    // the compositor doesn't tell workspaces, all are shown.
+    let filtered: Vec<Win>;
+    let windows = match current {
+        Some(ws) if cfg.current_workspace => {
+            filtered = windows.iter().filter(|w| w.workspace.is_none_or(|x| x == ws)).cloned().collect();
+            &filtered[..]
+        }
+        _ => windows,
+    };
     let mut out: Vec<Item> = Vec::new();
     let pinned = cfg.show != TaskShow::Running;
     let running = cfg.show != TaskShow::Pinned;
@@ -172,36 +216,6 @@ fn icon_px() -> i32 {
     heroui::theme::current().font_size + 4
 }
 
-/// The room a taskbar at `w` can have: its section's width minus the
-/// other modules and the gaps (the section's spacer, last in left sections
-/// and first in right ones, gives way). None before the bar is laid out,
-/// or in the center.
-fn available(w: &heroui::fltk::widget::Widget, section: Section) -> Option<i32> {
-    let parent = heroui::fltk::group::Flex::from_dyn_widget(&w.parent()?)?;
-    if parent.w() <= 0 {
-        return None;
-    }
-    let n = parent.children();
-    let spacer = match section {
-        Section::Left => n - 1,
-        Section::Right => 0,
-        Section::Center => return None,
-    };
-    let mut used = 0;
-    let mut shown = 0;
-    for k in 0..n {
-        let Some(c) = parent.child(k) else { continue };
-        if !c.visible() {
-            continue;
-        }
-        shown += 1;
-        if k != spacer && c.as_widget_ptr() != w.as_widget_ptr() {
-            used += c.w();
-        }
-    }
-    Some((parent.w() - used - parent.pad() * (shown - 1).max(0)).max(0))
-}
-
 /// Button widths for `items` in at most `max` px.
 fn widths(items: &[Item], style: TaskStyle, icon: i32, button_width: i32, max: i32) -> Vec<i32> {
     let small = icon + 2 * BTN_PAD;
@@ -258,7 +272,7 @@ impl View {
     }
 }
 
-pub fn view(i: usize, section: Section, sections: crate::Sections) -> Element<Bar, Msg> {
+pub fn view(i: usize) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
         let v = Rc::new(RefCell::new(View { items: vec![], style: TaskStyle::Icons, button_width: 180, hover: None, pressed: None }));
         let mut f = Frame::default();
@@ -316,10 +330,10 @@ pub fn view(i: usize, section: Section, sections: crate::Sections) -> Element<Ba
         let last_room = Cell::new(None);
         ctx.bind(move |bar: &Bar| {
             let Some(cfg) = bar.modules[i].taskbar.as_ref() else { return };
-            let items = items(cfg, &bar.taskbar.windows);
+            let items = items(cfg, &bar.desktop.windows, bar.desktop.current_workspace());
             // Runs after every update; only the window list or the room
             // the bar leaves (screen size) make it do anything.
-            let room = available(&w, section);
+            let room = crate::fit::room(&w);
             let mut s = v.borrow_mut();
             if s.items == items && last_width.get() >= 0 && last_room.get() == room {
                 return;
@@ -336,7 +350,7 @@ pub fn view(i: usize, section: Section, sections: crate::Sections) -> Element<Ba
             s.hover = None;
             drop(s);
             if width != last_width.replace(width) {
-                crate::resize_module(&mut w, width, section, i, &sections);
+                crate::fit::set_width(&mut w, width);
             }
             repaint(&mut w);
         });
@@ -408,32 +422,47 @@ mod tests {
         App { id: id.into(), name: id.into(), icon: id.into(), exec: id.into() }
     }
     fn win(id: u64, app_id: &str, focused: bool) -> Win {
-        Win { id, app_id: app_id.into(), title: format!("{app_id} {id}"), focused, app: Some(app(app_id)) }
+        Win { id, app_id: app_id.into(), title: format!("{app_id} {id}"), focused, app: Some(app(app_id)), workspace: Some(id % 2) }
     }
     fn cfg(show: TaskShow, style: TaskStyle) -> Config {
-        Config { show, style, pinned: vec![app("foot"), app("firefox")], max_width: 600, fixed_width: false, button_width: 180 }
+        Config { show, style, pinned: vec![app("foot"), app("firefox")], max_width: 600, fixed_width: false, button_width: 180, current_workspace: false }
+    }
+
+    fn items_all(cfg: &Config, wins: &[Win]) -> Vec<Item> {
+        items(cfg, wins, None)
+    }
+
+    #[test]
+    fn current_workspace_only() {
+        let wins = [win(1, "mpv", false), win(2, "foot", true)];
+        let mut c = cfg(TaskShow::Both, TaskStyle::Icons);
+        c.current_workspace = true;
+        let it = items(&c, &wins, Some(0));
+        let icons: Vec<&str> = it.iter().map(|i| i.icon.as_str()).collect();
+        assert_eq!(icons, ["foot", "firefox"], "mpv is on workspace 1; pinned apps stay");
+        assert_eq!(items(&c, &wins, None).len(), 3, "unknown workspace: everything");
     }
 
     #[test]
     fn grouping_and_order() {
         let wins = [win(1, "mpv", false), win(2, "foot", true), win(3, "foot", false)];
-        let it = items(&cfg(TaskShow::Both, TaskStyle::Icons), &wins);
+        let it = items_all(&cfg(TaskShow::Both, TaskStyle::Icons), &wins);
         let ids: Vec<&str> = it.iter().map(|i| i.icon.as_str()).collect();
         assert_eq!(ids, ["foot", "firefox", "mpv"]);
         assert_eq!(it[0].windows, [2, 3]);
         assert!(it[0].focused && it[1].windows.is_empty());
 
-        let it = items(&cfg(TaskShow::Running, TaskStyle::Icons), &wins);
+        let it = items_all(&cfg(TaskShow::Running, TaskStyle::Icons), &wins);
         assert_eq!(it.len(), 2, "no launcher for firefox");
 
-        let it = items(&cfg(TaskShow::Both, TaskStyle::IconsTitles), &wins);
+        let it = items_all(&cfg(TaskShow::Both, TaskStyle::IconsTitles), &wins);
         let labels: Vec<&str> = it.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(labels, ["", "mpv 1", "foot 2", "foot 3"], "firefox launcher, then each window");
     }
 
     #[test]
     fn widths_shrink_to_fit() {
-        let it = items(&cfg(TaskShow::Running, TaskStyle::IconsTitles), &[win(1, "a", false), win(2, "b", false)]);
+        let it = items_all(&cfg(TaskShow::Running, TaskStyle::IconsTitles), &[win(1, "a", false), win(2, "b", false)]);
         assert_eq!(widths(&it, TaskStyle::IconsTitles, 18, 180, 600), [180, 180]);
         assert_eq!(widths(&it, TaskStyle::IconsTitles, 18, 180, 204), [100, 100]);
         // Never smaller than an icon button.

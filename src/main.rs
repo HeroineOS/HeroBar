@@ -5,12 +5,15 @@
 
 mod apps;
 mod config;
+mod fit;
 mod modules;
 mod reload;
 mod taskbar;
 mod windows;
+mod workspaces;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -23,18 +26,23 @@ use heroui::fltk::prelude::*;
 use heroui::hover::is_hovered;
 use heroui::prelude::*;
 
-use modules::Module;
+use modules::{Kind, Module};
 
 struct Bar {
     config: config::Config,
     watch: reload::Watch,
+    /// Every module, including the ones inside groups.
     modules: Vec<Module>,
     /// Module indexes per section.
     left: Vec<usize>,
     center: Vec<usize>,
     right: Vec<usize>,
-    /// Open windows, for taskbar modules.
-    taskbar: taskbar::Taskbar,
+    /// Group of each module (by index), if it's in one.
+    parent: Vec<Option<usize>>,
+    /// Groups whose drawer is open.
+    open: HashSet<usize>,
+    /// Windows and workspaces, for taskbar and workspaces modules.
+    desktop: taskbar::Desktop,
 }
 
 #[derive(Clone)]
@@ -48,28 +56,75 @@ enum Msg {
     Launched,
     /// Once a second: did the config or the theme change?
     CheckReload,
-    /// News from the compositor about windows.
+    /// News from the compositor about windows and workspaces.
     Windows(windows::Update),
     /// A taskbar button was clicked (with mouse button 1-3).
     Task(taskbar::Item, i32),
+    /// Switch to a workspace.
+    Workspace(u64),
+    /// Open or close group `i`'s drawer.
+    Drawer(usize),
 }
 
 impl Bar {
     fn new(config: config::Config, watch: reload::Watch) -> Bar {
         let mut modules = Vec::new();
+        let mut parent = Vec::new();
         let mut section = |names: &[String]| {
-            names
-                .iter()
-                .map(|name| {
-                    modules.push(Module::new(name, config.modules.get(name)));
-                    modules.len() - 1
-                })
-                .collect::<Vec<_>>()
+            let mut idx = Vec::new();
+            for name in names {
+                let cfg = config.modules.get(name);
+                modules.push(Module::new(name, cfg));
+                parent.push(None);
+                let g = modules.len() - 1;
+                idx.push(g);
+                // A group's modules follow it.
+                if modules[g].kind == Kind::Group {
+                    for member in cfg.and_then(|c| c.modules.as_ref()).into_iter().flatten() {
+                        modules.push(Module::new(member, config.modules.get(member)));
+                        parent.push(Some(g));
+                    }
+                }
+            }
+            idx
         };
         let left = section(&config.bar.modules_left);
         let center = section(&config.bar.modules_center);
         let right = section(&config.bar.modules_right);
-        Bar { config, watch, modules, left, center, right, taskbar: taskbar::Taskbar::default() }
+        Bar { config, watch, modules, left, center, right, parent, open: HashSet::new(), desktop: taskbar::Desktop::default() }
+    }
+
+    /// The modules in group `g`.
+    fn members(&self, g: usize) -> Vec<usize> {
+        (0..self.modules.len()).filter(|&i| self.parent[i] == Some(g)).collect()
+    }
+
+    /// True if module `i` is in a closed drawer.
+    fn hidden(&self, i: usize) -> bool {
+        self.parent[i].is_some_and(|g| self.modules[g].cfg.drawer == Some(true) && !self.open.contains(&g))
+    }
+
+    fn launch(cmd: String) -> Task<Msg> {
+        Task::perform(move || {
+            modules::launch(&cmd);
+            Msg::Launched
+        })
+    }
+
+    /// The view of module `i` (any kind).
+    fn module_element(&self, i: usize, center: bool) -> Element<Bar, Msg> {
+        let m = &self.modules[i];
+        let in_group = self.parent[i].is_some();
+        match m.kind {
+            Kind::Taskbar => taskbar::view(i),
+            Kind::Workspaces => workspaces::view(i, m.font_size, in_group),
+            Kind::Spacer => spacer_view(&m.cfg, center || in_group),
+            Kind::Group => {
+                let members = self.members(i).into_iter().map(|j| self.module_element(j, center)).collect();
+                group_view(i, members, m.cfg.drawer == Some(true), m.icon.clone())
+            }
+            _ => module_view(i, m.command.is_some(), in_group),
+        }
     }
 }
 
@@ -88,21 +143,26 @@ impl App for Bar {
             Msg::Output(i, out) => self.modules[i].set_output(out),
             Msg::Click(i) => {
                 if let Some(cmd) = self.modules[i].command.clone() {
-                    return Task::perform(move || {
-                        modules::launch(&cmd);
-                        Msg::Launched
-                    });
+                    return Self::launch(cmd);
                 }
             }
             Msg::Launched => {}
-            Msg::Windows(windows::Update::Ready(c)) => self.taskbar.control = Some(c),
-            Msg::Windows(windows::Update::Windows(w)) => self.taskbar.windows = w,
+            Msg::Windows(windows::Update::Ready(c)) => self.desktop.control = Some(c),
+            Msg::Windows(windows::Update::Windows(w)) => self.desktop.windows = w,
+            Msg::Windows(windows::Update::Workspaces(w)) => self.desktop.workspaces = w,
             Msg::Task(item, button) => {
-                if let Some(cmd) = taskbar::click(&item, button, &self.taskbar.windows, self.taskbar.control.as_ref()) {
-                    return Task::perform(move || {
-                        modules::launch(&cmd);
-                        Msg::Launched
-                    });
+                if let Some(cmd) = taskbar::click(&item, button, &self.desktop.windows, self.desktop.control.as_ref()) {
+                    return Self::launch(cmd);
+                }
+            }
+            Msg::Workspace(id) => {
+                if let Some(c) = &self.desktop.control {
+                    c.send(windows::Cmd::FocusWorkspace(id));
+                }
+            }
+            Msg::Drawer(g) => {
+                if !self.open.remove(&g) {
+                    self.open.insert(g);
                 }
             }
             Msg::CheckReload => {
@@ -126,28 +186,28 @@ impl App for Bar {
     }
 
     fn view(&self) -> Element<Self, Msg> {
-        let widths = Sections::default();
         let section = |which: Section, idx: &[usize]| {
-            let mut items: Vec<Element<Bar, Msg>> =
-                idx.iter()
-                .map(|&i| match self.modules[i].kind {
-                    modules::Kind::Taskbar => taskbar::view(i, which, widths.clone()),
-                    _ => module_view(i, self.modules[i].command.is_some(), which, widths.clone()),
-                })
-                .collect();
-            // Left items pack to the left, right items to the right.
+            let center = which == Section::Center;
+            let mut items: Vec<Element<Bar, Msg>> = idx.iter().map(|&i| self.module_element(i, center)).collect();
+            // Left items pack to the left, right items to the right: the
+            // free space is at the inner end (shared with expanding spacers).
             match which {
-                Section::Left => items.push(spacer()),
-                Section::Right => items.insert(0, spacer()),
+                Section::Left => items.push(flexible_space()),
+                Section::Right => items.insert(0, flexible_space()),
                 Section::Center => {}
             }
-            row(items).spacing(self.config.bar.spacing)
+            let row = row(items).spacing(self.config.bar.spacing);
+            if center {
+                content_sized(row).fixed(0)
+            } else {
+                row
+            }
         };
         let pad = self.config.bar.padding;
         with_margins(
             row(vec![
                 section(Section::Left, &self.left),
-                section(Section::Center, &self.center).fixed(0),
+                section(Section::Center, &self.center),
                 section(Section::Right, &self.right),
             ])
             .spacing(0),
@@ -162,14 +222,17 @@ impl App for Bar {
     }
 
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
+        let desktop = self.modules.iter().any(|m| matches!(m.kind, Kind::Taskbar | Kind::Workspaces));
+        // The monitor whose workspaces to show, if one is configured.
+        let output = self.modules.iter().find(|m| m.kind == Kind::Workspaces).and_then(|m| m.cfg.output.clone());
         self.modules
             .iter()
             .enumerate()
             .filter(|(_, m)| m.is_dynamic())
             .map(|(i, m)| Subscription::every(Duration::from_secs_f64(m.interval), Msg::Tick(i)))
             .chain([Subscription::every(Duration::from_secs(1), Msg::CheckReload)])
-            .chain(self.modules.iter().any(|m| m.kind == modules::Kind::Taskbar).then(|| {
-                Subscription::worker(|tx: heroui::Sender<Msg>| windows::run(move |u| tx.send(Msg::Windows(u))))
+            .chain(desktop.then(|| {
+                Subscription::worker(move |tx: heroui::Sender<Msg>| windows::run(output, move |u| tx.send(Msg::Windows(u))))
             }))
             .collect()
     }
@@ -204,13 +267,6 @@ pub enum Section {
     Right,
 }
 
-/// Measured widths of the center section's modules, to keep the center
-/// section exactly as wide as its content (and so truly centered).
-#[derive(Clone, Default)]
-pub struct Sections {
-    center: Rc<RefCell<Vec<(usize, i32)>>>,
-}
-
 /// Sets a row/column's margins per side (left, top, right, bottom).
 fn with_margins(el: Element<Bar, Msg>, (l, t, r, b): (i32, i32, i32, i32)) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
@@ -222,30 +278,71 @@ fn with_margins(el: Element<Bar, Msg>, (l, t, r, b): (i32, i32, i32, i32)) -> El
     })
 }
 
-/// Horizontal padding inside a module.
-const PAD: i32 = 10;
-/// Gap between a module's icon and its text.
-const ICON_GAP: i32 = 6;
+/// Marks a row as sized to its content (see `fit`).
+fn content_sized(el: Element<Bar, Msg>) -> Element<Bar, Msg> {
+    Element::new(move |ctx| {
+        let w = el.build(ctx);
+        if let Some(f) = Flex::from_dyn_widget(&w) {
+            fit::content_sized(&f);
+        }
+        w
+    })
+}
+
+/// Empty space that shares the row's free room.
+fn flexible_space() -> Element<Bar, Msg> {
+    Element::new(|_| {
+        let mut f = Frame::default();
+        f.set_frame(FrameType::NoBox);
+        fit::flexible(&f);
+        f.as_base_widget()
+    })
+}
+
+/// Sizes from [style] (None: from the theme).
+#[derive(Clone, Copy)]
+struct Sizes {
+    padding: i32,
+    margin: i32,
+    icon: Option<i32>,
+}
 
 thread_local! {
     /// The island style, when modules sit on islands.
     static ISLANDS: Cell<Option<config::IslandStyle>> = const { Cell::new(None) };
+    static SIZES: Cell<Sizes> = const { Cell::new(Sizes { padding: 10, margin: 3, icon: None }) };
+}
+
+/// Space above and below module backgrounds.
+pub fn margin() -> i32 {
+    SIZES.with(Cell::get).margin
+}
+
+/// Gap between a module's icon and its text.
+const ICON_GAP: i32 = 6;
+
+fn island_radius(h: i32) -> i32 {
+    let t = heroui::theme::current();
+    match ISLANDS.with(Cell::get) {
+        Some(config::IslandStyle::Sharp) => 0,
+        Some(config::IslandStyle::Pill) => h / 2,
+        _ => t.radius.min(h / 2).min(10),
+    }
 }
 
 /// Paints a module's island (when islands are on): its own background,
 /// with the bar's see-through gaps around it.
 pub fn island(x: i32, y: i32, w: i32, h: i32) {
-    let Some(style) = ISLANDS.with(Cell::get) else { return };
+    if ISLANDS.with(Cell::get).is_none() {
+        return;
+    }
     let t = heroui::theme::current();
     // On a see-through bar the island is the bar color; on an opaque one
     // (X11, no fork) it has to stand out from it.
     draw::set_draw_color(if heroui::is_transparent() { t.background } else { t.surface });
-    let (y, h) = (y + 3, h - 6);
-    let r = match style {
-        config::IslandStyle::Sharp => 0,
-        config::IslandStyle::Rounded => t.radius.min(h / 2).min(10),
-        config::IslandStyle::Pill => h / 2,
-    };
+    let m = margin();
+    let (y, h) = (y + m, h - 2 * m);
+    let r = island_radius(h);
     if r == 0 {
         draw::draw_rectf(x, y, w, h);
     } else {
@@ -253,60 +350,82 @@ pub fn island(x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-fn icon_size(t: &Theme) -> i32 {
-    t.font_size + 2
+/// A module's resolved sizes: its own, else [style]'s, else the theme's.
+#[derive(Clone, Copy)]
+struct ModSizes {
+    padding: i32,
+    icon: Option<i32>,
+    font: Option<i32>,
+}
+
+impl ModSizes {
+    fn of(m: &Module) -> ModSizes {
+        let s = SIZES.with(Cell::get);
+        ModSizes { padding: m.padding.unwrap_or(s.padding), icon: m.icon_size.or(s.icon), font: m.font_size }
+    }
+    fn font(&self, t: &Theme) -> i32 {
+        self.font.unwrap_or(t.font_size)
+    }
+    fn icon(&self, t: &Theme) -> i32 {
+        self.icon.unwrap_or(self.font(t) + 2)
+    }
 }
 
 /// A module's width for its icon and text (0 hides it). Built-in modules
 /// with nothing to report (no battery, no audio) hide, icon and all; a
 /// custom one can be just an icon.
-fn module_width(icon: &str, text: &str, custom: bool) -> i32 {
+fn module_width(icon: &str, text: &str, custom: bool, sz: ModSizes) -> i32 {
     if text.is_empty() && !custom {
         return 0;
     }
     let t = heroui::theme::current();
-    draw::set_font(t.font(), t.font_size);
+    draw::set_font(t.font(), sz.font(&t));
     let text_w = if text.is_empty() { 0 } else { draw::width(text).ceil() as i32 };
-    let icon_w = if icon.is_empty() { 0 } else { icon_size(&t) + if text.is_empty() { 0 } else { ICON_GAP } };
+    let icon_w = if icon.is_empty() { 0 } else { sz.icon(&t) + if text.is_empty() { 0 } else { ICON_GAP } };
     if text_w + icon_w == 0 {
         0
     } else {
-        text_w + icon_w + 2 * PAD
+        text_w + icon_w + 2 * sz.padding
     }
+}
+
+/// Paints a module: island (unless in a group), hover, icon, text.
+fn paint_module(w: &dyn WidgetExt, icon: &str, text: &str, hovered: bool, in_group: bool, sz: ModSizes) {
+    let t = heroui::theme::current();
+    if !in_group {
+        island(w.x(), w.y(), w.w(), w.h());
+    }
+    if hovered {
+        draw::set_draw_color(t.surface_alt);
+        let m = margin();
+        let h = w.h() - 2 * m;
+        let r = if ISLANDS.with(Cell::get).is_some() { island_radius(h) } else { t.radius.min(h / 2) };
+        draw::draw_rounded_rectf(w.x(), w.y() + m, w.w(), h, r);
+    }
+    let mut x = w.x() + sz.padding;
+    if !icon.is_empty() {
+        let s = sz.icon(&t);
+        heroui::icons::draw(icon, x, w.y() + (w.h() - s) / 2, s, t.text);
+        x += s + ICON_GAP;
+    }
+    draw::set_draw_color(t.text);
+    draw::set_font(t.font(), sz.font(&t));
+    draw::draw_text2(text, x, w.y(), w.x() + w.w() - x, w.h(), Align::Left | Align::Inside);
 }
 
 /// A module: its icon and text, sized to fit; clickable if it has an
 /// on-click action.
-fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) -> Element<Bar, Msg> {
+fn module_view(i: usize, clickable: bool, in_group: bool) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
         // (icon, text) shown.
         let shown: Rc<RefCell<(String, String)>> = Rc::default();
+        let sizes: Rc<Cell<ModSizes>> = Rc::new(Cell::new(ModSizes { padding: 10, icon: None, font: None }));
         let paint = {
             let shown = shown.clone();
+            let sizes = sizes.clone();
             move |w: &mut dyn WidgetExt, hovered: bool| {
-                // The theme in use now: it changes live (Appearance).
-                let t = heroui::theme::current();
-                island(w.x(), w.y(), w.w(), w.h());
-                if hovered {
-                    draw::set_draw_color(t.surface_alt);
-                    let h = w.h() - 6;
-                    let r = match ISLANDS.with(Cell::get) {
-                        Some(config::IslandStyle::Sharp) => 0,
-                        Some(config::IslandStyle::Pill) => h / 2,
-                        _ => t.radius.min(h / 2),
-                    };
-                    draw::draw_rounded_rectf(w.x(), w.y() + 3, w.w(), h, r);
-                }
                 let (icon, text) = &*shown.borrow();
-                let mut x = w.x() + PAD;
-                if !icon.is_empty() {
-                    let s = icon_size(&t);
-                    heroui::icons::draw(icon, x, w.y() + (w.h() - s) / 2, s, t.text);
-                    x += s + ICON_GAP;
-                }
-                draw::set_draw_color(t.text);
-                draw::set_font(t.font(), t.font_size);
-                draw::draw_text2(text, x, w.y(), w.x() + w.w() - x, w.h(), Align::Left | Align::Inside);
+                paint_module(w, icon, text, hovered, in_group, sizes.get());
             }
         };
         // Clickable modules are buttons (FLTK handles the clicks, HeroUI the
@@ -327,21 +446,25 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
         };
         let mut w = widget.clone();
         let last_width = Cell::new(-1);
+        let was_hidden = Cell::new(false);
         ctx.bind(move |bar: &Bar| {
             let m = &bar.modules[i];
+            let hidden = bar.hidden(i);
             // The first run always sizes the module (last_width starts at
             // -1), so one with nothing to show takes no space instead of a
             // share of the bar.
             {
                 let cur = shown.borrow();
-                if cur.0 == m.icon && cur.1 == m.text && last_width.get() >= 0 {
+                if cur.0 == m.icon && cur.1 == m.text && last_width.get() >= 0 && was_hidden.get() == hidden {
                     return;
                 }
             }
+            was_hidden.set(hidden);
+            sizes.set(ModSizes::of(m));
             *shown.borrow_mut() = (m.icon.clone(), m.text.clone());
-            let width = module_width(&m.icon, &m.text, m.kind == modules::Kind::Custom);
+            let width = if hidden { 0 } else { module_width(&m.icon, &m.text, m.kind == Kind::Custom, sizes.get()) };
             if width != last_width.replace(width) {
-                resize_module(&mut w, width, section, i, &widths);
+                fit::set_width(&mut w, width);
             }
             repaint(&mut w);
         });
@@ -349,33 +472,98 @@ fn module_view(i: usize, clickable: bool, section: Section, widths: Sections) ->
     })
 }
 
-/// Gives a module its new width in its section, and keeps the center
-/// section as wide as its content.
-pub fn resize_module(w: &mut heroui::fltk::widget::Widget, width: i32, section: Section, i: usize, widths: &Sections) {
-    if width == 0 {
-        w.hide();
-    } else {
-        w.show();
-    }
-    let Some(parent) = w.parent() else { return };
-    let Some(mut flex) = Flex::from_dyn_widget(&parent) else { return };
-    flex.fixed(&*w, width);
-    flex.recalc();
-    if section == Section::Center {
-        let mut c = widths.center.borrow_mut();
-        match c.iter_mut().find(|(j, _)| *j == i) {
-            Some(e) => e.1 = width,
-            None => c.push((i, width)),
+/// A spacer: fixed `width`, or (`expand`, outside the center) a share of
+/// the section's free space. Optionally a line or dots in the middle.
+fn spacer_view(cfg: &config::Module, fixed_only: bool) -> Element<Bar, Msg> {
+    let expand = cfg.expand == Some(true) && !fixed_only;
+    let width = cfg.width.unwrap_or(if expand { 0 } else { 12 }).max(0);
+    let style = cfg.style.clone().unwrap_or_default();
+    Element::new(move |ctx| {
+        let mut f = Frame::default();
+        f.set_frame(FrameType::NoBox);
+        let style = style.clone();
+        f.draw(move |f| {
+            let t = heroui::theme::current();
+            let m = margin() + 4;
+            let (cx, y0, y1) = (f.x() + f.w() / 2, f.y() + m, f.y() + f.h() - m);
+            draw::set_draw_color(heroui::widgets::mix(t.text, t.background, 0.6));
+            match style.as_str() {
+                "line" => draw::draw_line(cx, y0, cx, y1),
+                "dots" => {
+                    let mut y = y0 + 1;
+                    while y < y1 {
+                        draw::draw_rectf(cx, y, 2, 2);
+                        y += 5;
+                    }
+                }
+                _ => {}
+            }
+        });
+        let mut w = f.as_base_widget();
+        if expand {
+            fit::flexible(&f);
+        } else {
+            let done = Cell::new(false);
+            ctx.bind(move |_: &Bar| {
+                if !done.replace(true) {
+                    fit::set_width(&mut w, width);
+                }
+            });
         }
-        let shown: Vec<i32> = c.iter().map(|&(_, w)| w).filter(|&w| w > 0).collect();
-        let total = shown.iter().sum::<i32>() + flex.pad() * (shown.len() as i32 - 1).max(0);
-        if let Some(outer) = flex.parent().and_then(|p| Flex::from_dyn_widget(&p)) {
-            let mut outer = outer;
-            outer.fixed(&flex, total);
-            outer.recalc();
+        f.as_base_widget()
+    })
+}
+
+/// A group: its modules side by side on one background. With `drawer`,
+/// only an icon shows until it's clicked.
+fn group_view(g: usize, members: Vec<Element<Bar, Msg>>, drawer: bool, icon: String) -> Element<Bar, Msg> {
+    Element::new(move |ctx| {
+        let mut children = Vec::with_capacity(members.len() + 1);
+        if drawer {
+            children.push(drawer_toggle(g, icon));
         }
-    }
-    heroui::relayout_parent(&flex);
+        children.extend(members);
+        let w = row(children).spacing(0).build(ctx);
+        if let Some(mut f) = Flex::from_dyn_widget(&w) {
+            fit::content_sized(&f);
+            // One island behind all the members; FLTK draws them on top.
+            f.super_draw_first(false);
+            f.draw(|f| island(f.x(), f.y(), f.w(), f.h()));
+        }
+        w
+    })
+}
+
+/// A drawer's button: the group's icon, highlighted while open.
+fn drawer_toggle(g: usize, icon: String) -> Element<Bar, Msg> {
+    Element::new(move |ctx| {
+        let open = Rc::new(Cell::new(false));
+        let sizes = SIZES.with(Cell::get);
+        let mut b = custom_button({
+            let open = open.clone();
+            move |b| {
+                let hovered = is_hovered(b) || b.value() || open.get();
+                let sz = ModSizes { padding: sizes.padding, icon: sizes.icon, font: None };
+                paint_module(b, &icon, "", hovered, true, sz);
+            }
+        });
+        let emit = ctx.emitter();
+        b.set_callback(move |_| emit(Msg::Drawer(g)));
+        let mut w = b.as_base_widget();
+        let first = Cell::new(true);
+        ctx.bind(move |bar: &Bar| {
+            let is_open = bar.open.contains(&g);
+            if first.replace(false) {
+                let t = heroui::theme::current();
+                let width = sizes.icon.unwrap_or(t.font_size + 2) + 2 * sizes.padding;
+                fit::set_width(&mut w, width);
+            }
+            if open.replace(is_open) != is_open {
+                repaint(&mut w);
+            }
+        });
+        b.as_base_widget()
+    })
 }
 
 fn usage() -> &'static str {
@@ -443,6 +631,14 @@ fn main() {
     if config.bar.islands {
         ISLANDS.with(|c| c.set(Some(config.bar.island_style)));
     }
+    let st = &config.style;
+    SIZES.with(|c| {
+        c.set(Sizes {
+            padding: st.module_padding.unwrap_or(10).max(0),
+            margin: st.module_margin.unwrap_or(3).min(height / 2 - 4).max(0),
+            icon: st.icon_size,
+        })
+    });
     let mut settings = Settings::panel("herobar", edge, height).class("herobar").transparent(config.bar.islands);
     settings.reserve = Some((edge, if config.bar.reserve_space { height } else { 0 }));
     if let Err(e) = heroui::run(Bar::new(config, watch), settings) {

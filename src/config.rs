@@ -79,6 +79,12 @@ pub struct Style {
     pub hover: Option<String>,
     pub font: Option<String>,
     pub font_size: Option<i32>,
+    /// Icon size in modules (default: font size + 2).
+    pub icon_size: Option<i32>,
+    /// Space left and right inside each module.
+    pub module_padding: Option<i32>,
+    /// Space above and below each module's background (islands, hover).
+    pub module_margin: Option<i32>,
 }
 
 /// One `[modules.<name>]` section. Which keys matter depends on the kind,
@@ -99,10 +105,10 @@ pub struct Module {
     /// Icon before the text: a built-in icon, a theme icon name or an
     /// image path; "" for none. Built-in kinds pick one by default.
     pub icon: Option<String>,
-    /// taskbar: "running", "pinned" or "both"
-    pub show: Option<TaskShow>,
-    /// taskbar: "icons" (one button per app) or "icons-titles" (one per window)
-    pub style: Option<TaskStyle>,
+    /// taskbar: "running", "pinned" or "both"; workspaces: "all" or "occupied"
+    pub show: Option<String>,
+    /// taskbar: "icons" or "icons-titles"; spacer: "none", "line" or "dots"
+    pub style: Option<String>,
     /// taskbar: apps to always show, as .desktop file names ("foot", "firefox-esr")
     pub pinned: Option<Vec<String>>,
     /// taskbar: the most room it takes, in pixels; buttons shrink to fit
@@ -111,23 +117,23 @@ pub struct Module {
     pub fixed_width: Option<bool>,
     /// taskbar, icons-titles: the widest a window button gets
     pub button_width: Option<i32>,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TaskShow {
-    Running,
-    Pinned,
-    #[default]
-    Both,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TaskStyle {
-    #[default]
-    Icons,
-    IconsTitles,
+    /// taskbar: windows of "all" workspaces or only the "current" one
+    pub workspace: Option<String>,
+    /// workspaces: which monitor's workspaces (default: the active one)
+    pub output: Option<String>,
+    /// spacer: width in pixels
+    pub width: Option<i32>,
+    /// spacer: take a share of the section's free space (centers what's
+    /// between it and the next flexible space)
+    pub expand: Option<bool>,
+    /// group: its modules, shown together on one background
+    pub modules: Option<Vec<String>>,
+    /// group: collapsed to its icon; a click shows the modules
+    pub drawer: Option<bool>,
+    /// Size overrides for this module (see [style]).
+    pub padding: Option<i32>,
+    pub icon_size: Option<i32>,
+    pub font_size: Option<i32>,
 }
 
 /// A string is shorthand for `{ action = "run-command", arg = "..." }`.
@@ -164,18 +170,51 @@ pub fn default_path() -> Option<PathBuf> {
     Some(base.join("hero").join("bar.toml"))
 }
 
+/// The kinds a module name can start with ("cpu", "cpu/2", "custom/x").
+pub const KINDS: &str = "clock, cpu, memory, battery, network, volume, taskbar, workspaces, spacer, group/<name>, custom/<name>";
+
+fn check_name(name: &str) -> Result<crate::modules::Kind, String> {
+    crate::modules::Kind::from_name(name).ok_or_else(|| format!("unknown module kind '{name}' (built-in: {KINDS}; add /<anything> for more of one kind)"))
+}
+
+fn one_of(name: &str, key: &str, v: &Option<String>, allowed: &[&str]) -> Result<(), String> {
+    match v {
+        Some(v) if !allowed.contains(&v.as_str()) => {
+            Err(format!("[modules.\"{name}\"] {key} = \"{v}\": expected {}", allowed.join(", ")))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn parse(text: &str) -> Result<Config, String> {
+    use crate::modules::Kind;
     let config: Config = toml::from_str(text).map_err(|e| e.to_string())?;
     for name in config.bar.modules_left.iter().chain(&config.bar.modules_center).chain(&config.bar.modules_right) {
-        if crate::modules::Kind::from_name(name).is_none() {
-            return Err(format!("unknown module kind '{name}' (built-in: clock, cpu, memory, battery, network, volume, taskbar, custom/<name>)"));
-        }
+        check_name(name)?;
     }
     for (name, m) in &config.modules {
+        let kind = check_name(name)?;
         if let Some(a) = &m.on_click {
             if a.command().is_none() {
                 return Err(format!("[modules.\"{name}\"] on-click: only the run-command action is supported"));
             }
+        }
+        match kind {
+            Kind::Taskbar => {
+                one_of(name, "show", &m.show, &["running", "pinned", "both"])?;
+                one_of(name, "style", &m.style, &["icons", "icons-titles"])?;
+                one_of(name, "workspace", &m.workspace, &["all", "current"])?;
+            }
+            Kind::Workspaces => one_of(name, "show", &m.show, &["all", "occupied"])?,
+            Kind::Spacer => one_of(name, "style", &m.style, &["none", "line", "dots"])?,
+            Kind::Group => {
+                for member in m.modules.iter().flatten() {
+                    if matches!(check_name(member)?, Kind::Group) {
+                        return Err(format!("[modules.\"{name}\"] modules: groups can't contain groups ('{member}')"));
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(config)
@@ -230,6 +269,9 @@ mod tests {
         assert!(parse("[bar]\nhieght = 3").is_err());
         assert!(parse("[bar]\nmodules-left = [\"weather\"]").is_err());
         assert!(parse("[modules.clock]\non-click = { action = \"quit\" }").is_err());
+        assert!(parse("[modules.taskbar]\nstyle = \"big\"").is_err());
+        assert!(parse("[modules.\"group/a\"]\nmodules = [\"group/b\"]").is_err());
+        assert!(parse("[bar]\nmodules-left = [\"cpu/2\", \"spacer/x\", \"group/sys\"]\n[modules.\"group/sys\"]\nmodules = [\"cpu\", \"memory/big\"]").is_ok());
     }
 
     #[test]

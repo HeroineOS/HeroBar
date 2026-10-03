@@ -1,9 +1,11 @@
-//! The open windows, for the taskbar, from the compositor:
+//! Open windows and workspaces, for the taskbar and workspaces modules,
+//! from the compositor:
 //!
 //! - HeroWM (and fht-compositor): its IPC event stream ($FHTC_SOCKET_PATH).
-//! - Other wlroots-style compositors (sway, Hyprland, labwc, river, Wayfire):
+//! - sway: its IPC ($SWAYSOCK).
+//! - Other wlroots-style compositors (Hyprland, labwc, river, Wayfire):
 //!   the wlr-foreign-toplevel-management protocol, over our own small
-//!   Wayland connection.
+//!   Wayland connection (windows only: it has no workspaces).
 //!
 //! Both run on one worker thread that sleeps until the compositor reports
 //! a change, then sends the whole (small) list to the UI.
@@ -24,12 +26,27 @@ pub struct Win {
     pub focused: bool,
     /// From the app's .desktop file, if found.
     pub app: Option<apps::App>,
+    /// The workspace it's on, if the compositor says.
+    pub workspace: Option<u64>,
+}
+
+/// A workspace of the bar's monitor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ws {
+    pub id: u64,
+    /// "1", "2"... or the workspace's name.
+    pub label: String,
+    /// Shown on the monitor now.
+    pub active: bool,
+    /// Has windows.
+    pub occupied: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Cmd {
     Focus(u64),
     Close(u64),
+    FocusWorkspace(u64),
 }
 
 /// Sends window commands to the compositor.
@@ -47,10 +64,12 @@ pub enum Update {
     /// The backend is running; commands go through this.
     Ready(Control),
     Windows(Vec<Win>),
+    Workspaces(Vec<Ws>),
 }
 
 /// The worker: picks a backend and reports until the connection ends.
-pub fn run(send: impl Fn(Update) -> bool + Send + 'static) {
+/// `output`: the monitor whose workspaces to report (None: the active one).
+pub fn run(output: Option<String>, send: impl Fn(Update) -> bool + Send + 'static) {
     let mut finder = apps::Finder::default();
     let mut emit = move |u: Update| match u {
         Update::Windows(wins) => {
@@ -66,7 +85,9 @@ pub fn run(send: impl Fn(Update) -> bool + Send + 'static) {
         ready => send(ready),
     };
     let result = if let Some(path) = std::env::var_os("FHTC_SOCKET_PATH") {
-        fht::run(path.into(), &mut emit)
+        fht::run(path.into(), output.as_deref(), &mut emit)
+    } else if let Some(path) = std::env::var_os("SWAYSOCK") {
+        sway::run(path.into(), output.as_deref(), &mut emit)
     } else if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         wlr::run(&mut emit)
     } else {
@@ -82,6 +103,7 @@ pub fn run(send: impl Fn(Update) -> bool + Send + 'static) {
 mod fht {
     use super::*;
     use serde::Deserialize;
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     #[derive(Deserialize)]
@@ -90,6 +112,30 @@ mod fht {
         id: u64,
         title: Option<String>,
         app_id: Option<String>,
+        workspace_id: Option<u64>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    struct Workspace {
+        id: u64,
+        #[serde(default)]
+        windows: Vec<u64>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    struct Monitor {
+        output: String,
+        workspaces: Vec<u64>,
+        active_workspace_idx: usize,
+        #[serde(default)]
+        active: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct Space {
+        monitors: HashMap<String, Monitor>,
     }
 
     #[derive(Deserialize)]
@@ -99,10 +145,22 @@ mod fht {
         FocusedWindowChanged { id: Option<u64> },
         WindowChanged(Window),
         WindowClosed { id: u64 },
+        Workspaces(BTreeMap<String, Workspace>),
+        WorkspaceChanged(Workspace),
+        WorkspaceRemoved { id: u64 },
+        ActiveWorkspaceChanged { id: u64 },
+        Space(Space),
     }
 
     fn win(w: Window) -> Win {
-        Win { id: w.id, app_id: w.app_id.unwrap_or_default(), title: w.title.unwrap_or_default(), focused: false, app: None }
+        Win {
+            id: w.id,
+            app_id: w.app_id.unwrap_or_default(),
+            title: w.title.unwrap_or_default(),
+            focused: false,
+            app: None,
+            workspace: w.workspace_id,
+        }
     }
 
     /// Runs one action on a fresh connection (the subscribed one can't
@@ -111,6 +169,7 @@ mod fht {
         let json = match cmd {
             Cmd::Focus(id) => format!(r#"{{"action":{{"focus-window":{{"window-id":{id}}}}}}}"#),
             Cmd::Close(id) => format!(r#"{{"action":{{"close-window":{{"window-id":{id},"kill":false}}}}}}"#),
+            Cmd::FocusWorkspace(id) => format!(r#"{{"action":{{"focus-workspace":{{"workspace-id":{id}}}}}}}"#),
         };
         let mut s = UnixStream::connect(path)?;
         s.write_all(json.as_bytes())?;
@@ -122,6 +181,78 @@ mod fht {
         Ok(())
     }
 
+    #[derive(Default)]
+    struct State {
+        wins: BTreeMap<u64, Win>,
+        focused: Option<u64>,
+        workspaces: BTreeMap<u64, Workspace>,
+        space: Option<Space>,
+    }
+
+    impl State {
+        fn apply(&mut self, ev: Event) {
+            match ev {
+                Event::Windows(all) => self.wins = all.into_values().map(|w| (w.id, win(w))).collect(),
+                Event::FocusedWindowChanged { id } => self.focused = id,
+                Event::WindowChanged(w) => {
+                    self.wins.insert(w.id, win(w));
+                }
+                Event::WindowClosed { id } => {
+                    self.wins.remove(&id);
+                }
+                Event::Workspaces(all) => self.workspaces = all.into_values().map(|w| (w.id, w)).collect(),
+                Event::WorkspaceChanged(w) => {
+                    self.workspaces.insert(w.id, w);
+                }
+                Event::WorkspaceRemoved { id } => {
+                    self.workspaces.remove(&id);
+                }
+                Event::ActiveWorkspaceChanged { id } => {
+                    if let Some(space) = &mut self.space {
+                        for m in space.monitors.values_mut() {
+                            if let Some(i) = m.workspaces.iter().position(|&w| w == id) {
+                                m.active_workspace_idx = i;
+                            }
+                        }
+                    }
+                }
+                Event::Space(s) => self.space = Some(s),
+            }
+        }
+
+        fn windows(&self) -> Vec<Win> {
+            self.wins
+                .values()
+                .cloned()
+                .map(|mut w| {
+                    w.focused = Some(w.id) == self.focused;
+                    w
+                })
+                .collect()
+        }
+
+        /// The chosen monitor's workspaces (1..9), in order.
+        fn workspaces(&self, output: Option<&str>) -> Vec<Ws> {
+            let Some(space) = &self.space else { return vec![] };
+            let mon = match output {
+                Some(o) => space.monitors.values().find(|m| m.output == o),
+                None => space.monitors.values().find(|m| m.active).or_else(|| space.monitors.values().next()),
+            };
+            let Some(mon) = mon else { return vec![] };
+            mon.workspaces
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| Ws {
+                    id,
+                    label: (i + 1).to_string(),
+                    active: i == mon.active_workspace_idx,
+                    occupied: self.workspaces.get(&id).is_some_and(|w| !w.windows.is_empty())
+                        || self.wins.values().any(|w| w.workspace == Some(id)),
+                })
+                .collect()
+        }
+    }
+
     #[cfg(test)]
     pub fn parse(line: &str) -> Option<(u64, String)> {
         match serde_json::from_str::<Event>(line).ok()? {
@@ -130,7 +261,16 @@ mod fht {
         }
     }
 
-    pub fn run(path: PathBuf, emit: &mut dyn FnMut(Update) -> bool) -> Result<(), String> {
+    #[cfg(test)]
+    pub fn workspaces_from(lines: &[&str]) -> Vec<Ws> {
+        let mut st = State::default();
+        for l in lines {
+            st.apply(serde_json::from_str(l).unwrap());
+        }
+        st.workspaces(None)
+    }
+
+    pub fn run(path: PathBuf, output: Option<&str>, emit: &mut dyn FnMut(Update) -> bool) -> Result<(), String> {
         let mut s = UnixStream::connect(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         s.write_all(b"\"subscribe\"\n").map_err(|e| e.to_string())?;
         let control = {
@@ -147,31 +287,198 @@ mod fht {
         if !emit(Update::Ready(control)) {
             return Ok(());
         }
-        let mut wins: BTreeMap<u64, Win> = BTreeMap::new();
-        let mut focused = None;
+        let mut st = State::default();
+        let (mut last_wins, mut last_ws) = (None, None);
         for line in BufReader::new(s).lines() {
             let line = line.map_err(|e| e.to_string())?;
-            // Workspace, layer-shell and space events don't concern us.
+            // Layer-shell events and anything newer don't concern us.
             let Ok(ev) = serde_json::from_str::<Event>(&line) else { continue };
-            match ev {
-                Event::Windows(all) => wins = all.into_values().map(|w| (w.id, win(w))).collect(),
-                Event::FocusedWindowChanged { id } => focused = id,
-                Event::WindowChanged(w) => {
-                    wins.insert(w.id, win(w));
-                }
-                Event::WindowClosed { id } => {
-                    wins.remove(&id);
+            st.apply(ev);
+            // Send only what changed.
+            let wins = st.windows();
+            if last_wins.as_ref() != Some(&wins) {
+                last_wins = Some(wins.clone());
+                if !emit(Update::Windows(wins)) {
+                    break;
                 }
             }
-            let list = wins.values().cloned().map(|mut w| {
-                w.focused = Some(w.id) == focused;
-                w
-            });
-            if !emit(Update::Windows(list.collect())) {
-                break;
+            let ws = st.workspaces(output);
+            if last_ws.as_ref() != Some(&ws) {
+                last_ws = Some(ws.clone());
+                if !emit(Update::Workspaces(ws)) {
+                    break;
+                }
             }
         }
         Ok(())
+    }
+}
+
+/// sway's IPC (the i3 protocol): subscribe to window and workspace events;
+/// on each, read the tree and the workspace list again.
+mod sway {
+    use super::*;
+    use serde::Deserialize;
+    use std::path::PathBuf;
+
+    const RUN_COMMAND: u32 = 0;
+    const GET_WORKSPACES: u32 = 1;
+    const SUBSCRIBE: u32 = 2;
+    const GET_TREE: u32 = 4;
+
+    fn send(s: &mut UnixStream, kind: u32, payload: &str) -> std::io::Result<()> {
+        let mut msg = Vec::with_capacity(14 + payload.len());
+        msg.extend_from_slice(b"i3-ipc");
+        msg.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
+        msg.extend_from_slice(&kind.to_ne_bytes());
+        msg.extend_from_slice(payload.as_bytes());
+        s.write_all(&msg)
+    }
+
+    fn recv(s: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> {
+        let mut head = [0u8; 14];
+        s.read_exact(&mut head)?;
+        let len = u32::from_ne_bytes(head[6..10].try_into().expect("4 bytes")) as usize;
+        let kind = u32::from_ne_bytes(head[10..14].try_into().expect("4 bytes"));
+        let mut body = vec![0u8; len];
+        s.read_exact(&mut body)?;
+        Ok((kind, body))
+    }
+
+    fn request(path: &PathBuf, kind: u32, payload: &str) -> std::io::Result<Vec<u8>> {
+        let mut s = UnixStream::connect(path)?;
+        send(&mut s, kind, payload)?;
+        Ok(recv(&mut s)?.1)
+    }
+
+    #[derive(Deserialize)]
+    struct Node {
+        id: u64,
+        #[serde(rename = "type")]
+        kind: String,
+        name: Option<String>,
+        app_id: Option<String>,
+        #[serde(default)]
+        focused: bool,
+        window_properties: Option<WindowProps>,
+        #[serde(default)]
+        nodes: Vec<Node>,
+        #[serde(default)]
+        floating_nodes: Vec<Node>,
+    }
+
+    #[derive(Deserialize)]
+    struct WindowProps {
+        class: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct Workspace {
+        id: u64,
+        name: String,
+        #[serde(default)]
+        focused: bool,
+        #[serde(default)]
+        visible: bool,
+        output: String,
+    }
+
+    /// Windows in the tree, with their workspace.
+    fn collect(n: &Node, ws: Option<u64>, out: &mut Vec<Win>) {
+        let ws = if n.kind == "workspace" { Some(n.id) } else { ws };
+        let app_id = n.app_id.clone().or_else(|| n.window_properties.as_ref().and_then(|p| p.class.clone()));
+        if (n.kind == "con" || n.kind == "floating_con") && app_id.is_some() && n.nodes.is_empty() {
+            out.push(Win {
+                id: n.id,
+                app_id: app_id.unwrap_or_default(),
+                title: n.name.clone().unwrap_or_default(),
+                focused: n.focused,
+                app: None,
+                workspace: ws,
+            });
+        }
+        // The scratchpad isn't a real workspace.
+        if n.name.as_deref() == Some("__i3") {
+            return;
+        }
+        for c in n.nodes.iter().chain(&n.floating_nodes) {
+            collect(c, ws, out);
+        }
+    }
+
+    fn snapshot(path: &PathBuf, output: Option<&str>) -> Result<(Vec<Win>, Vec<Ws>), String> {
+        let tree: Node = serde_json::from_slice(&request(path, GET_TREE, "").map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        let mut wins = Vec::new();
+        collect(&tree, None, &mut wins);
+        wins.sort_by_key(|w| w.id);
+        let all: Vec<Workspace> =
+            serde_json::from_slice(&request(path, GET_WORKSPACES, "").map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        // The bar's monitor: the configured one, else the focused one.
+        let out = output.map(str::to_owned).or_else(|| all.iter().find(|w| w.focused).map(|w| w.output.clone()));
+        let ws = all
+            .iter()
+            .filter(|w| out.as_deref().is_none_or(|o| w.output == o))
+            .map(|w| Ws {
+                id: w.id,
+                label: w.name.clone(),
+                active: w.visible,
+                occupied: wins.iter().any(|x| x.workspace == Some(w.id)),
+            })
+            .collect();
+        Ok((wins, ws))
+    }
+
+    pub fn run(path: PathBuf, output: Option<&str>, emit: &mut dyn FnMut(Update) -> bool) -> Result<(), String> {
+        let mut events = UnixStream::connect(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        send(&mut events, SUBSCRIBE, r#"["window","workspace"]"#).map_err(|e| e.to_string())?;
+        recv(&mut events).map_err(|e| e.to_string())?;
+        let control = {
+            let path = path.clone();
+            Control(Arc::new(move |cmd| {
+                let c = match cmd {
+                    Cmd::Focus(id) => format!("[con_id={id}] focus"),
+                    Cmd::Close(id) => format!("[con_id={id}] kill"),
+                    // Workspace ids aren't commands' arguments; names are.
+                    Cmd::FocusWorkspace(id) => format!("__ws {id}"),
+                };
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let c = match c.strip_prefix("__ws ") {
+                        Some(id) => {
+                            let Ok(body) = request(&path, GET_WORKSPACES, "") else { return };
+                            let Ok(all) = serde_json::from_slice::<Vec<Workspace>>(&body) else { return };
+                            let Some(w) = all.iter().find(|w| w.id.to_string() == id) else { return };
+                            format!("workspace \"{}\"", w.name.replace('"', "\\\""))
+                        }
+                        None => c,
+                    };
+                    if let Err(e) = request(&path, RUN_COMMAND, &c) {
+                        eprintln!("herobar: taskbar: {e}");
+                    }
+                });
+            }))
+        };
+        if !emit(Update::Ready(control)) {
+            return Ok(());
+        }
+        let (mut last_wins, mut last_ws) = (None, None);
+        loop {
+            let (wins, ws) = snapshot(&path, output)?;
+            if last_wins.as_ref() != Some(&wins) {
+                last_wins = Some(wins.clone());
+                if !emit(Update::Windows(wins)) {
+                    return Ok(());
+                }
+            }
+            if last_ws.as_ref() != Some(&ws) {
+                last_ws = Some(ws.clone());
+                if !emit(Update::Workspaces(ws)) {
+                    return Ok(());
+                }
+            }
+            // Wait for the next event (its content doesn't matter).
+            recv(&mut events).map_err(|e| e.to_string())?;
+        }
     }
 }
 
@@ -510,6 +817,8 @@ mod wlr {
                     for cmd in cmd_rx.try_iter() {
                         let id = match cmd {
                             Cmd::Focus(id) | Cmd::Close(id) => id,
+                            // No workspaces in this protocol.
+                            Cmd::FocusWorkspace(_) => continue,
                         };
                         let Some((&h, _)) = s.tops.iter().find(|(_, t)| t.id == id) else { continue };
                         let h = h as *mut c_void;
@@ -531,7 +840,7 @@ mod wlr {
                     let list = s
                         .tops
                         .values()
-                        .map(|t| Win { id: t.id, app_id: t.app_id.clone(), title: t.title.clone(), focused: t.active, app: None })
+                        .map(|t| Win { id: t.id, app_id: t.app_id.clone(), title: t.title.clone(), focused: t.active, app: None, workspace: None })
                         .collect::<Vec<_>>();
                     let mut list = list;
                     list.sort_by_key(|w| w.id);
@@ -552,5 +861,16 @@ mod tests {
         // As fht-compositor-ipc serializes them (kebab-case fields).
         let line = r#"{"event":"window-changed","data":{"id":3,"title":"t","app-id":"foot","workspace-id":0,"size":[1,1],"location":[0,0],"fullscreened":false,"maximized":false,"tiled":true,"activated":true,"focused":true}}"#;
         assert_eq!(super::fht::parse(line), Some((3, "foot".into())));
+    }
+
+    #[test]
+    fn herowm_workspaces() {
+        let ws = super::fht::workspaces_from(&[
+            r#"{"event":"workspaces","data":{"10":{"id":10,"output":"eDP-1","windows":[3],"active-window-idx":0,"fullscreen-window-idx":null,"mwfact":0.5,"nmaster":1},"11":{"id":11,"output":"eDP-1","windows":[],"active-window-idx":null,"fullscreen-window-idx":null,"mwfact":0.5,"nmaster":1}}}"#,
+            r#"{"event":"space","data":{"monitors":{"eDP-1":{"output":"eDP-1","workspaces":[10,11,12,13,14,15,16,17,18],"active-workspace-idx":1,"active":true}},"primary-idx":0,"active-idx":0}}"#,
+        ]);
+        assert_eq!(ws.len(), 9);
+        assert_eq!((ws[0].label.as_str(), ws[0].occupied, ws[0].active), ("1", true, false));
+        assert_eq!((ws[1].occupied, ws[1].active), (false, true));
     }
 }

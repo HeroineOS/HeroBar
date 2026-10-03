@@ -15,12 +15,24 @@ pub enum Kind {
     Network,
     Volume,
     Taskbar,
+    Workspaces,
+    Spacer,
+    Group,
     Custom,
 }
 
 impl Kind {
+    /// The kind of module `name`: its part before any "/" ("cpu/2" is
+    /// a cpu). custom and group modules need a name after the "/".
     pub fn from_name(name: &str) -> Option<Kind> {
-        Some(match name {
+        let (base, rest) = match name.split_once('/') {
+            Some((b, r)) => (b, Some(r)),
+            None => (name, None),
+        };
+        if rest == Some("") {
+            return None;
+        }
+        Some(match base {
             "clock" => Kind::Clock,
             "cpu" => Kind::Cpu,
             "memory" => Kind::Memory,
@@ -28,7 +40,10 @@ impl Kind {
             "network" => Kind::Network,
             "volume" => Kind::Volume,
             "taskbar" => Kind::Taskbar,
-            n if n.starts_with("custom/") && n.len() > 7 => Kind::Custom,
+            "workspaces" => Kind::Workspaces,
+            "spacer" => Kind::Spacer,
+            "group" if rest.is_some() => Kind::Group,
+            "custom" if rest.is_some() => Kind::Custom,
             _ => return None,
         })
     }
@@ -39,7 +54,7 @@ impl Kind {
             Kind::Cpu => 2.0,
             Kind::Memory | Kind::Network | Kind::Volume => 5.0,
             Kind::Battery => 30.0,
-            Kind::Custom | Kind::Taskbar => 10.0,
+            _ => 10.0,
         }
     }
 
@@ -51,7 +66,7 @@ impl Kind {
             Kind::Battery => "{capacity}%",
             Kind::Network => "{ifname}",
             Kind::Volume => "{volume}%",
-            Kind::Custom | Kind::Taskbar => "",
+            _ => "",
         }
     }
 
@@ -64,7 +79,8 @@ impl Kind {
             Kind::Battery => "battery",
             Kind::Network => "network-wired",
             Kind::Volume => "volume-high",
-            Kind::Clock | Kind::Custom | Kind::Taskbar => "",
+            Kind::Group => "apps",
+            _ => "",
         }
     }
 }
@@ -91,8 +107,14 @@ pub struct Module {
     fixed_text: Option<String>,
     pub exec: Option<String>,
     battery: Option<String>,
-    /// taskbar settings (the windows themselves are in `Bar::taskbar`)
+    /// taskbar settings (the windows themselves are in `Bar::desktop`)
     pub taskbar: Option<crate::taskbar::Config>,
+    /// The config section (spacer, group and workspaces settings).
+    pub cfg: config::Module,
+    /// Size overrides (None: the [style] / theme value).
+    pub padding: Option<i32>,
+    pub icon_size: Option<i32>,
+    pub font_size: Option<i32>,
     /// cpu: last (busy, total) jiffies
     last_cpu: (u64, u64),
 }
@@ -116,6 +138,10 @@ impl Module {
             exec: if kind == Kind::Volume { Some(cfg.exec.clone().unwrap_or_else(|| VOLUME_CMD.to_owned())) } else { cfg.exec.clone() },
             battery: cfg.name.clone(),
             taskbar: (kind == Kind::Taskbar).then(|| crate::taskbar::Config::new(Some(cfg))),
+            cfg: cfg.clone(),
+            padding: cfg.padding,
+            icon_size: cfg.icon_size,
+            font_size: cfg.font_size,
             last_cpu: (0, 0),
         };
         if kind == Kind::Battery && m.battery.is_none() {
@@ -135,14 +161,28 @@ impl Module {
     pub fn is_dynamic(&self) -> bool {
         match self.kind {
             Kind::Custom => self.exec.is_some(),
-            // Updated by window events, not a timer.
-            Kind::Taskbar => false,
+            // Updated by compositor events, or not at all.
+            Kind::Taskbar | Kind::Workspaces | Kind::Spacer | Kind::Group => false,
             _ => true,
         }
     }
 
     /// Takes the output of `exec` (run on a background thread).
     pub fn set_output(&mut self, out: String) {
+        if self.kind == Kind::Custom {
+            // {"text": "...", "icon": "..."} sets the icon too.
+            if out.starts_with('{') {
+                if let Ok(j) = serde_json::from_str::<CustomOutput>(&out) {
+                    self.text = j.text.unwrap_or_default();
+                    if let Some(i) = j.icon {
+                        self.icon = i;
+                    }
+                    return;
+                }
+            }
+            self.text = out;
+            return;
+        }
         if self.kind != Kind::Volume {
             self.text = out;
             return;
@@ -233,10 +273,16 @@ impl Module {
                     self.format_disconnected.clone()
                 }
             },
-            Kind::Custom | Kind::Volume | Kind::Taskbar => return,
+            _ => return,
         };
         self.text = text;
     }
+}
+
+#[derive(serde::Deserialize)]
+struct CustomOutput {
+    text: Option<String>,
+    icon: Option<String>,
 }
 
 /// Replaces `{key}` placeholders.
@@ -382,6 +428,20 @@ mod tests {
         assert_eq!(Kind::from_name("custom/x"), Some(Kind::Custom));
         assert_eq!(Kind::from_name("custom/"), None);
         assert_eq!(Kind::from_name("weather"), None);
+        assert_eq!(Kind::from_name("cpu/2"), Some(Kind::Cpu));
+        assert_eq!(Kind::from_name("spacer"), Some(Kind::Spacer));
+        assert_eq!(Kind::from_name("group"), None);
+        assert_eq!(Kind::from_name("group/sys"), Some(Kind::Group));
+    }
+
+    #[test]
+    fn custom_json_output() {
+        let cfg = config::Module { exec: Some("x".into()), ..Default::default() };
+        let mut m = Module::new("custom/w", Some(&cfg));
+        m.set_output(r#"{"text": "21°", "icon": "weather-clear"}"#.into());
+        assert_eq!((m.text.as_str(), m.icon.as_str()), ("21°", "weather-clear"));
+        m.set_output("plain".into());
+        assert_eq!(m.text, "plain");
     }
 
     #[test]
