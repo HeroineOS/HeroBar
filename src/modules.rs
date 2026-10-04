@@ -20,6 +20,7 @@ pub enum Kind {
     Spacer,
     Group,
     Custom,
+    Launcher,
 }
 
 impl Kind {
@@ -44,6 +45,7 @@ impl Kind {
             "workspaces" => Kind::Workspaces,
             "bluetooth" => Kind::Bluetooth,
             "spacer" => Kind::Spacer,
+            "launcher" => Kind::Launcher,
             "group" if rest.is_some() => Kind::Group,
             "custom" if rest.is_some() => Kind::Custom,
             _ => return None,
@@ -85,6 +87,7 @@ impl Kind {
             Kind::Volume => "volume-high",
             Kind::Bluetooth => "bluetooth",
             Kind::Group => "apps",
+            Kind::Launcher => "cat",
             _ => "",
         }
     }
@@ -196,7 +199,7 @@ impl Module {
         match self.kind {
             Kind::Custom | Kind::Volume => self.exec.is_some(),
             // Updated by compositor events, or not at all.
-            Kind::Taskbar | Kind::Workspaces | Kind::Spacer | Kind::Group => false,
+            Kind::Taskbar | Kind::Workspaces | Kind::Spacer | Kind::Group | Kind::Launcher => false,
             _ => true,
         }
     }

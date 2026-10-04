@@ -152,6 +152,8 @@ enum Msg {
     Output(usize, String),
     /// Module `i` was clicked.
     Click(usize),
+    /// The launcher module `i` was clicked; its x in the bar.
+    OpenLauncher(usize, i32),
     Launched,
     /// Once a second: did the config or the theme change?
     CheckReload,
@@ -315,6 +317,7 @@ impl Bar {
                     content,
                 )
             }
+            Kind::Launcher if m.command.is_none() => module_view(i, Click::Launcher, in_group),
             _ => module_view(i, if m.command.is_some() { Click::Command } else { Click::None }, in_group),
         }
     }
@@ -343,6 +346,16 @@ impl App for Bar {
                 }
             }
             Msg::Launched => {}
+            Msg::OpenLauncher(i, x) => {
+                // Running it again closes it (it toggles).
+                let cmd = if self.modules[i].cfg.mode.as_deref() == Some("center") {
+                    "herolauncher".to_owned()
+                } else {
+                    let edge = if self.config.bar.position == config::Position::Bottom { "bottom" } else { "top" };
+                    format!("herolauncher --menu --edge {edge} --x {x} --offset {}", self.config.bar.height + 4)
+                };
+                return Self::launch(cmd);
+            }
             Msg::Windows(windows::Update::Ready(c)) => self.desktop.control = Some(c),
             Msg::Windows(windows::Update::Windows(w)) => self.desktop.windows = w,
             Msg::Windows(windows::Update::Workspaces(w)) => self.desktop.workspaces = w,
@@ -977,6 +990,8 @@ enum Click {
     Command,
     /// Opens its popup (on press: Wayland grants popups for a press).
     Popup,
+    /// Opens HeroLauncher at the module (on release, like a button).
+    Launcher,
 }
 
 /// A module: its icon and text, sized to fit; clickable if it has an
@@ -1008,13 +1023,13 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
                 }
             });
             b.as_base_widget()
-        } else if click == Click::Command {
+        } else if click == Click::Command || click == Click::Launcher {
             let mut b = custom_button(move |b| {
                 let hovered = if b.value() { 1.0 } else { hover_amount(b) };
                 paint(b, hovered)
             });
             let emit = ctx.emitter();
-            b.set_callback(move |_| emit(Msg::Click(i)));
+            b.set_callback(move |b| emit(if click == Click::Launcher { Msg::OpenLauncher(i, b.x()) } else { Msg::Click(i) }));
             b.as_base_widget()
         } else {
             let mut f = Frame::default();
@@ -1047,7 +1062,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
             *shown.borrow_mut() = (m.icon.clone(), m.text.clone(), m.reserve.clone());
 
             // Custom, Bluetooth and network modules may be just an icon.
-            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network);
+            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network | Kind::Launcher);
             // Changing numbers (CPU %, network speeds) would make the
             // module and its neighbors jitter: it's sized for its numbers
             // at their widest.

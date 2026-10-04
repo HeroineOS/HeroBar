@@ -141,6 +141,8 @@ pub struct Module {
     pub first_weekday: Option<String>,
     /// network: "long" ("1.7 KB/s") or "short" ("1.7K") speeds and totals
     pub units: Option<String>,
+    /// launcher: open HeroLauncher as a "menu" at the button or in the "center"
+    pub mode: Option<String>,
     /// volume, network, bluetooth, clock, battery: a click opens a popup (default true);
     /// false runs on-click instead. With the popup, on-click is its
     /// "Advanced" button.
@@ -246,6 +248,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             Kind::Spacer => one_of(name, "style", &m.style, &["none", "line", "dots"])?,
             Kind::Clock => one_of(name, "first-weekday", &m.first_weekday, &["monday", "sunday"])?,
             Kind::Network => one_of(name, "units", &m.units, &["long", "short"])?,
+            Kind::Launcher => one_of(name, "mode", &m.mode, &["menu", "center"])?,
             Kind::Group => {
                 for member in m.modules.iter().flatten() {
                     if matches!(check_name(member)?, Kind::Group) {
@@ -300,7 +303,8 @@ mod tests {
         assert_eq!(c.bar.modules_center, ["clock"]);
         assert_eq!(c.modules["taskbar"].pinned.as_deref().unwrap_or_default().first(), Some(&Pinned::App("foot".into())));
         assert_eq!(c.bar.island_style, IslandStyle::Rounded);
-        assert_eq!(c.modules["custom/menu"].on_click.as_ref().unwrap().command(), Some("heroappearance"));
+        assert_eq!(c.modules["launcher"].mode.as_deref(), Some("menu"));
+        assert!(parse("[modules.launcher]\nmode = \"side\"").is_err());
     }
 
     #[test]

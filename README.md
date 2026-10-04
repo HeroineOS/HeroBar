@@ -43,6 +43,7 @@ itself; a config with errors is reported and ignored until fixed). Appearance ed
 | `battery` | battery level (hidden without a battery); click: time left and screen brightness (brightnessctl) | `{capacity}` `{status}` |
 | `network` | connection of the default route; `units = "short"` for compact speeds (1.7K) | `{name}` `{essid}` `{ifname}` `{state}` `{signal}` `{down}` `{up}` `{down-total}` `{up-total}` |
 | `volume` | default output volume, via wpctl or pactl (hidden without audio) | `{volume}` |
+| `launcher` | opens HeroLauncher: `mode = "menu"` under the button, `"center"` in the middle; `icon`, `text = "Start"` | |
 | `taskbar` | pinned apps and open windows | (see below) |
 | `workspaces` | the monitor's workspaces; click to switch, wheel to step | |
 | `spacer` | fixed space, or `expand = true` to share free space (centers modules); `style = "line"` / `"dots"` | |
@@ -90,7 +91,7 @@ In short:
 position = "top"          # or "bottom"
 height = 34
 reserve-space = true
-modules-left = ["custom/menu"]
+modules-left = ["launcher", "custom/menu"]
 modules-center = ["clock"]
 modules-right = ["cpu", "memory"]
 
@@ -99,6 +100,9 @@ background = "#14141c"
 
 [modules.clock]
 format = "%a %d %b  %H:%M"
+
+[modules.launcher]         # opens HeroLauncher at the button (mode = "center": centered)
+text = "Start"            # and/or icon = "cat"
 
 [modules."custom/menu"]
 icon = "apps"

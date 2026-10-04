@@ -25,9 +25,10 @@ island-style = "rounded"   # "sharp", "rounded" or "pill"
 
 # Modules, from the screen edge inwards for left/right. Each name refers to a
 # [modules.<name>] section below. Kinds: clock, cpu, memory, battery, network,
-# volume, taskbar, workspaces, spacer, group/<name>, custom/<name>.
+# volume, bluetooth, launcher, taskbar, workspaces, spacer, group/<name>,
+# custom/<name>.
 # For more than one of a kind, add "/<anything>": "cpu/big", "spacer/2"...
-modules-left = ["custom/menu", "workspaces", "taskbar"]
+modules-left = ["launcher", "workspaces", "taskbar"]
 modules-center = ["clock"]
 modules-right = ["volume", "network", "group/system", "battery"]
 
@@ -153,8 +154,8 @@ modules = ["cpu", "memory"]
 
 # Spacers: fixed space, or expand = true to share the section's free space
 # with its edge, which centers what's between them. E.g.
-# modules-left = ["custom/menu", "spacer", "taskbar"] centers the taskbar
-# between the menu and the clock's section.
+# modules-left = ["launcher", "spacer", "taskbar"] centers the taskbar
+# between the launcher and the clock's section.
 #   [modules.spacer]
 #   width = 12
 #   expand = false
@@ -167,7 +168,15 @@ modules = ["cpu", "memory"]
 #   icon = "clock"
 #   exec = "uptime -p"
 #   interval = 60
-[modules."custom/menu"]
-icon = "apps"
-text = "HeroineOS"
-on-click = { action = "run-command", arg = "heroappearance" }
+#   [modules."custom/settings"]
+#   icon = "settings"
+#   on-click = { action = "run-command", arg = "heroappearance" }
+
+# Opens HeroLauncher (find and start apps, favorites): as a menu at the
+# button like XFCE's or Windows', or in the middle of the screen. For a
+# keyboard shortcut, bind "herolauncher" in your compositor (it opens
+# centered; running it again closes it). Needs the herolauncher package.
+# on-click = ... runs another launcher instead.
+[modules.launcher]
+icon = "cat"             # The button: an icon, and/or a word with text = "Start"
+mode = "menu"            # "menu": drops down from the button; "center": middle of the screen
