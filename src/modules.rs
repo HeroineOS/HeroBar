@@ -103,6 +103,10 @@ pub struct Module {
     pub name: String,
     pub kind: Kind,
     pub text: String,
+    /// `text` with its changing numbers at their widest (CPU at 100%,
+    /// speeds like "00.0 MB/s"): the module is sized for this, so it
+    /// keeps one width while the numbers change.
+    pub reserve: String,
     /// Icon shown before the text ("" = none).
     pub icon: String,
     /// Shown when the mouse rests on it.
@@ -146,6 +150,7 @@ impl Module {
             name: name.to_owned(),
             kind,
             text: String::new(),
+            reserve: String::new(),
             battery_info: None,
             tooltip: String::new(),
             icon: icon_cfg.clone().unwrap_or_else(|| kind.default_icon().to_owned()),
@@ -223,6 +228,7 @@ impl Module {
             return;
         };
         self.text = fill(&self.format, &[("volume", slot(vol.to_string()))]);
+        self.reserve = fill(&self.format, &[("volume", slot("100"))]);
         self.tooltip = if muted { format!("Volume: {vol}% (muted)") } else { format!("Volume: {vol}%") };
         self.set_icon(if muted || vol == 0 {
             "volume-muted"
@@ -261,6 +267,7 @@ impl Module {
         } else {
             fill(&self.format, &[("device", connected[0].to_owned()), ("count", connected.len().to_string())])
         };
+        self.reserve = self.text.clone();
     }
 
     /// Sets the dynamic icon, unless the config chose one.
@@ -273,6 +280,7 @@ impl Module {
     /// Re-reads the module's source. Custom `exec` modules are refreshed
     /// by the caller on a background thread instead.
     pub fn refresh(&mut self) {
+        let mut reserve = None;
         let text = match self.kind {
             Kind::Clock => {
                 self.tooltip = strftime("%A %-d %B %Y");
@@ -284,6 +292,7 @@ impl Module {
                 self.last_cpu = (busy, total);
                 let usage = if dt > 0 { 100 * db / dt } else { 0 };
                 self.tooltip = format!("CPU: {usage}% busy");
+                reserve = Some(fill(&self.format, &[("usage", slot("100"))]));
                 fill(&self.format, &[("usage", slot(usage.to_string()))])
             }
             Kind::Memory => {
@@ -294,6 +303,8 @@ impl Module {
                     let gib = |kib: u64| kib as f64 / 1024.0 / 1024.0;
                     let used = total.saturating_sub(avail);
                     self.tooltip = format!("Memory: {:.1} GiB used of {:.1} GiB ({}%)", gib(used), gib(total), 100 * used / total);
+                    let t = format!("{:.1}", gib(total));
+                    reserve = Some(fill(&self.format, &[("used", slot(t.clone())), ("total", t), ("percent", slot("100"))]));
                     fill(
                         &self.format,
                         &[
@@ -333,6 +344,8 @@ impl Module {
                             (None, s) => format!("Battery: {level}%\n{s}"),
                         };
                         self.battery_info = Some((level, status.clone(), time.clone()));
+                        let widest_time = if time.is_some() { "00 h 00 min" } else { "" };
+                        reserve = Some(fill(&self.format, &[("capacity", slot("100")), ("status", status.clone()), ("time", slot(widest_time))]));
                         fill(&self.format, &[("capacity", slot(capacity)), ("status", status), ("time", slot(time.unwrap_or_default()))])
                     }
                 }
@@ -373,6 +386,22 @@ impl Module {
                         b(rx as f64),
                         b(tx as f64),
                     );
+                    // Speeds and totals at their widest ("00.0 MB"; "00.0"
+                    // is wider than "000").
+                    reserve = Some(fill(
+                        &self.format,
+                        &[
+                            ("name", name.clone()),
+                            ("essid", essid.clone()),
+                            ("ifname", ifname.clone()),
+                            ("state", state.clone()),
+                            ("signal", slot("100")),
+                            ("down", slot("00.0 MB/s")),
+                            ("up", slot("00.0 MB/s")),
+                            ("down-total", slot("00.0 GB")),
+                            ("up-total", slot("00.0 GB")),
+                        ],
+                    ));
                     fill(
                         &self.format,
                         &[
@@ -396,6 +425,7 @@ impl Module {
             },
             _ => return,
         };
+        self.reserve = reserve.unwrap_or_else(|| text.clone());
         self.text = text;
     }
 }
@@ -426,9 +456,9 @@ pub fn battery_time(status: &str, now: Option<f64>, full: Option<f64>, rate: Opt
     Some(if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") })
 }
 
-/// Marks a changing number in module text: the bar gives it a slot,
-/// right-aligned, that grows at once but shrinks only after a while, so
-/// the text around it stays put. See `main.rs` `segments`.
+/// Marks a changing number in module text: the bar gives it a fixed slot
+/// (as wide as the same slot in `Module::reserve`), right-aligned, so the
+/// text around it stays put. See `main.rs` `segments`.
 pub const SLOT_START: char = '\u{1}';
 pub const SLOT_END: char = '\u{2}';
 
