@@ -103,6 +103,10 @@ pub struct Module {
     pub name: String,
     pub kind: Kind,
     pub text: String,
+    /// `text` with its changing numbers at their widest (CPU at 100%,
+    /// speeds like "00.0 MB/s"): the module is sized for this, so it
+    /// keeps one width while the numbers change.
+    pub reserve: String,
     /// Icon shown before the text ("" = none).
     pub icon: String,
     /// Shown when the mouse rests on it.
@@ -144,6 +148,7 @@ impl Module {
             name: name.to_owned(),
             kind,
             text: String::new(),
+            reserve: String::new(),
             tooltip: String::new(),
             icon: icon_cfg.clone().unwrap_or_else(|| kind.default_icon().to_owned()),
             icon_cfg,
@@ -219,7 +224,8 @@ impl Module {
             self.text.clear();
             return;
         };
-        self.text = fill(&self.format, &[("volume", vol.to_string())]);
+        self.text = fill(&self.format, &[("volume", slot(vol.to_string()))]);
+        self.reserve = fill(&self.format, &[("volume", slot("100"))]);
         self.tooltip = if muted { format!("Volume: {vol}% (muted)") } else { format!("Volume: {vol}%") };
         self.set_icon(if muted || vol == 0 {
             "volume-muted"
@@ -228,12 +234,6 @@ impl Module {
         } else {
             "volume-high"
         });
-    }
-
-    /// True if its text keeps changing width (speeds): its width is kept
-    /// steadier.
-    pub fn jittery(&self) -> bool {
-        self.kind == Kind::Network && (self.format.contains("{down}") || self.format.contains("{up}"))
     }
 
     /// Shows the Bluetooth state: hidden without an adapter, off, on, or
@@ -264,6 +264,7 @@ impl Module {
         } else {
             fill(&self.format, &[("device", connected[0].to_owned()), ("count", connected.len().to_string())])
         };
+        self.reserve = self.text.clone();
     }
 
     /// Sets the dynamic icon, unless the config chose one.
@@ -276,6 +277,7 @@ impl Module {
     /// Re-reads the module's source. Custom `exec` modules are refreshed
     /// by the caller on a background thread instead.
     pub fn refresh(&mut self) {
+        let mut reserve = None;
         let text = match self.kind {
             Kind::Clock => {
                 self.tooltip = strftime("%A %-d %B %Y");
@@ -287,7 +289,8 @@ impl Module {
                 self.last_cpu = (busy, total);
                 let usage = if dt > 0 { 100 * db / dt } else { 0 };
                 self.tooltip = format!("CPU: {usage}% busy");
-                fill(&self.format, &[("usage", usage.to_string())])
+                reserve = Some(fill(&self.format, &[("usage", slot("100"))]));
+                fill(&self.format, &[("usage", slot(usage.to_string()))])
             }
             Kind::Memory => {
                 let (avail, total) = meminfo();
@@ -297,12 +300,14 @@ impl Module {
                     let gib = |kib: u64| kib as f64 / 1024.0 / 1024.0;
                     let used = total.saturating_sub(avail);
                     self.tooltip = format!("Memory: {:.1} GiB used of {:.1} GiB ({}%)", gib(used), gib(total), 100 * used / total);
+                    let t = format!("{:.1}", gib(total));
+                    reserve = Some(fill(&self.format, &[("used", slot(t.clone())), ("total", t), ("percent", slot("100"))]));
                     fill(
                         &self.format,
                         &[
-                            ("used", format!("{:.1}", gib(used))),
+                            ("used", slot(format!("{:.1}", gib(used)))),
                             ("total", format!("{:.1}", gib(total))),
-                            ("percent", (100 * used / total).to_string()),
+                            ("percent", slot((100 * used / total).to_string())),
                         ],
                     )
                 }
@@ -335,7 +340,9 @@ impl Module {
                             (None, "Full") | (None, "Not charging") => format!("Battery: {level}%\nFully charged"),
                             (None, s) => format!("Battery: {level}%\n{s}"),
                         };
-                        fill(&self.format, &[("capacity", capacity), ("status", status), ("time", time.unwrap_or_default())])
+                        let widest_time = if time.is_some() { "00 h 00 min" } else { "" };
+                        reserve = Some(fill(&self.format, &[("capacity", slot("100")), ("status", status.clone()), ("time", slot(widest_time))]));
+                        fill(&self.format, &[("capacity", slot(capacity)), ("status", status), ("time", slot(time.unwrap_or_default()))])
                     }
                 }
                 None => String::new(),
@@ -375,6 +382,22 @@ impl Module {
                         b(rx as f64),
                         b(tx as f64),
                     );
+                    // Speeds and totals at their widest ("00.0 MB"; "00.0"
+                    // is wider than "000").
+                    reserve = Some(fill(
+                        &self.format,
+                        &[
+                            ("name", name.clone()),
+                            ("essid", essid.clone()),
+                            ("ifname", ifname.clone()),
+                            ("state", state.clone()),
+                            ("signal", slot("100")),
+                            ("down", slot("00.0 MB/s")),
+                            ("up", slot("00.0 MB/s")),
+                            ("down-total", slot("00.0 GB")),
+                            ("up-total", slot("00.0 GB")),
+                        ],
+                    ));
                     fill(
                         &self.format,
                         &[
@@ -382,11 +405,11 @@ impl Module {
                             ("essid", essid),
                             ("ifname", ifname),
                             ("state", state),
-                            ("signal", signal.map(|s| s.to_string()).unwrap_or_default()),
-                            ("down", format!("{}/s", b(down))),
-                            ("up", format!("{}/s", b(up))),
-                            ("down-total", b(rx as f64)),
-                            ("up-total", b(tx as f64)),
+                            ("signal", slot(signal.map(|s| s.to_string()).unwrap_or_default())),
+                            ("down", slot(format!("{}/s", b(down)))),
+                            ("up", slot(format!("{}/s", b(up)))),
+                            ("down-total", slot(b(rx as f64))),
+                            ("up-total", slot(b(tx as f64))),
                         ],
                     )
                 }
@@ -398,6 +421,7 @@ impl Module {
             },
             _ => return,
         };
+        self.reserve = reserve.unwrap_or_else(|| text.clone());
         self.text = text;
     }
 }
@@ -426,6 +450,27 @@ pub fn battery_time(status: &str, now: Option<f64>, full: Option<f64>, rate: Opt
         return None;
     }
     Some(if mins >= 60 { format!("{} h {} min", mins / 60, mins % 60) } else { format!("{mins} min") })
+}
+
+/// Marks a changing number in module text: the bar gives it a fixed slot
+/// (as wide as the same slot in `Module::reserve`), right-aligned, so the
+/// text around it stays put. See `main.rs` `segments`.
+pub const SLOT_START: char = '\u{1}';
+pub const SLOT_END: char = '\u{2}';
+
+fn slot(v: impl Into<String>) -> String {
+    let v = v.into();
+    if v.is_empty() {
+        v
+    } else {
+        format!("{SLOT_START}{v}{SLOT_END}")
+    }
+}
+
+/// `text` without slot marks.
+#[cfg(test)]
+fn plain(text: &str) -> String {
+    text.chars().filter(|&c| c != SLOT_START && c != SLOT_END).collect()
 }
 
 /// Replaces `{key}` placeholders.
@@ -653,9 +698,9 @@ mod tests {
     fn volume_output() {
         let mut m = Module::new("volume", None);
         m.set_output("40 0".into());
-        assert_eq!((m.text.as_str(), m.icon.as_str()), ("40%", "volume-low"));
+        assert_eq!((plain(&m.text).as_str(), m.icon.as_str()), ("40%", "volume-low"));
         m.set_output("75 1".into());
-        assert_eq!((m.text.as_str(), m.icon.as_str()), ("75%", "volume-muted"));
+        assert_eq!((plain(&m.text).as_str(), m.icon.as_str()), ("75%", "volume-muted"));
         m.set_output(String::new());
         assert_eq!(m.text, "");
         let custom = config::Module { icon: Some(String::new()), ..Default::default() };

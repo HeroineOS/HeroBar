@@ -720,14 +720,16 @@ impl ModSizes {
 
 /// A module's width for its icon and text (0 hides it). Built-in modules
 /// with nothing to report (no battery, no audio) hide, icon and all; a
-/// custom one can be just an icon.
-fn module_width(icon: &str, text: &str, custom: bool, sz: ModSizes) -> i32 {
+/// custom one can be just an icon. Changing numbers get their slot's
+/// widest width (from `reserve`), so the module keeps one width.
+fn module_width(icon: &str, text: &str, reserve: &str, custom: bool, sz: ModSizes) -> i32 {
     if text.is_empty() && !custom {
         return 0;
     }
     let t = heroui::theme::current();
     draw::set_font(t.font(), sz.font(&t));
-    let text_w = text_width(text, sz.icon(&t));
+    let slots = slot_widths(text, reserve);
+    let text_w = text_width(text, &slots, sz.icon(&t)).max(text_width(&zeros(reserve), &slots, sz.icon(&t)));
     let icon_w = if icon.is_empty() { 0 } else { sz.icon(&t) + if text.is_empty() { 0 } else { ICON_GAP } };
     if text_w + icon_w == 0 {
         0
@@ -736,26 +738,69 @@ fn module_width(icon: &str, text: &str, custom: bool, sz: ModSizes) -> i32 {
     }
 }
 
-/// A piece of module text: words, or an inline icon (`{icon:name}` in a
-/// format, e.g. arrows before network speeds).
+/// Every digit as "0" (digits are about as wide as each other, but not
+/// quite in every font).
+fn zeros(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect()
+}
+
+/// A piece of module text: words, an inline icon (`{icon:name}` in a
+/// format, e.g. arrows before network speeds), or the `k`th changing
+/// number (marked by `modules::slot`).
 enum Seg<'a> {
     Text(&'a str),
     Icon(&'a str),
+    Slot(&'a str, usize),
 }
 
 fn segments(text: &str) -> Vec<Seg<'_>> {
+    use modules::{SLOT_END, SLOT_START};
     let mut out = Vec::new();
+    let mut slot = 0;
     let mut rest = text;
-    while let Some(i) = rest.find("{icon:") {
-        let Some(end) = rest[i..].find('}') else { break };
+    loop {
+        let icon = rest.find("{icon:");
+        let mark = rest.find(SLOT_START);
+        let (i, is_icon) = match (icon, mark) {
+            (Some(a), Some(b)) if a < b => (a, true),
+            (_, Some(b)) => (b, false),
+            (Some(a), None) => (a, true),
+            (None, None) => break,
+        };
+        let end_mark = if is_icon { '}' } else { SLOT_END };
+        let Some(end) = rest[i..].find(end_mark) else { break };
         if i > 0 {
             out.push(Seg::Text(&rest[..i]));
         }
-        out.push(Seg::Icon(&rest[i + 6..i + end]));
-        rest = &rest[i + end + 1..];
+        if is_icon {
+            out.push(Seg::Icon(&rest[i + 6..i + end]));
+        } else {
+            out.push(Seg::Slot(&rest[i + SLOT_START.len_utf8()..i + end], slot));
+            slot += 1;
+        }
+        rest = &rest[i + end + end_mark.len_utf8()..];
     }
     if !rest.is_empty() {
         out.push(Seg::Text(rest));
+    }
+    out
+}
+
+/// Each slot's width: the widest of its value now and in `reserve`, digits
+/// as "0" (font set).
+fn slot_widths(text: &str, reserve: &str) -> Vec<i32> {
+    let mut out: Vec<i32> = Vec::new();
+    for src in [text, reserve] {
+        for seg in segments(src) {
+            if let Seg::Slot(v, k) = seg {
+                let w = draw::width(&zeros(v)).ceil() as i32;
+                if k < out.len() {
+                    out[k] = out[k].max(w);
+                } else {
+                    out.push(w);
+                }
+            }
+        }
     }
     out
 }
@@ -764,25 +809,26 @@ fn segments(text: &str) -> Vec<Seg<'_>> {
 const INLINE_GAP: i32 = 2;
 
 /// Width of module text with inline icons `icon` px wide (font set).
-fn text_width(text: &str, icon: i32) -> i32 {
+fn text_width(text: &str, slots: &[i32], icon: i32) -> i32 {
     segments(text)
         .iter()
         .map(|s| match s {
             Seg::Text(t) => draw::width(t).ceil() as i32,
             Seg::Icon(_) => icon * 4 / 5 + INLINE_GAP,
+            Seg::Slot(v, k) => slots.get(*k).copied().unwrap_or_else(|| draw::width(v).ceil() as i32),
         })
         .sum()
 }
 
 /// Paints a module: island (unless in a group), hover, icon, text.
-fn paint_module(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_group: bool, sz: ModSizes) {
+fn paint_module(w: &dyn WidgetExt, icon: &str, text: &str, reserve: &str, hovered: f32, in_group: bool, sz: ModSizes) {
     // While it grows or shrinks, nothing spills onto its neighbors.
     draw::push_clip(w.x(), w.y(), w.w(), w.h());
-    paint_module_(w, icon, text, hovered, in_group, sz);
+    paint_module_(w, icon, text, reserve, hovered, in_group, sz);
     draw::pop_clip();
 }
 
-fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_group: bool, sz: ModSizes) {
+fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, reserve: &str, hovered: f32, in_group: bool, sz: ModSizes) {
     let t = heroui::theme::current();
     if !in_group {
         island(w.x(), w.y(), w.w(), w.h());
@@ -809,6 +855,7 @@ fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_gro
     draw::set_font(t.font(), sz.font(&t));
     // Inline icons are a bit smaller than the module's icon.
     let small = sz.icon(&t) * 4 / 5;
+    let slots = slot_widths(text, reserve);
     for seg in segments(text) {
         match seg {
             Seg::Text(s) => {
@@ -820,6 +867,14 @@ fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_gro
             Seg::Icon(name) => {
                 heroui::icons::draw(name, x, w.y() + (w.h() - small) / 2, small, t.text);
                 x += small + INLINE_GAP;
+            }
+            Seg::Slot(v, k) => {
+                // Right-aligned in its slot: what follows stays put.
+                draw::set_draw_color(t.text);
+                let sw = slots.get(k).copied().unwrap_or(0);
+                let tw = draw::width(v).ceil() as i32;
+                draw::draw_text2(v, x + sw - tw, w.y(), tw + 2, w.h(), Align::Left | Align::Inside);
+                x += sw;
             }
         }
     }
@@ -908,15 +963,15 @@ enum Click {
 /// on-click action or a popup.
 fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        // (icon, text) shown.
-        let shown: Rc<RefCell<(String, String)>> = Rc::default();
+        // (icon, text, reserve) shown.
+        let shown: Rc<RefCell<(String, String, String)>> = Rc::default();
         let sizes: Rc<Cell<ModSizes>> = Rc::new(Cell::new(ModSizes { padding: 10, icon: None, font: None }));
         let paint = {
             let shown = shown.clone();
             let sizes = sizes.clone();
             move |w: &mut dyn WidgetExt, hovered: f32| {
-                let (icon, text) = &*shown.borrow();
-                paint_module(w, icon, text, hovered, in_group, sizes.get());
+                let (icon, text, reserve) = &*shown.borrow();
+                paint_module(w, icon, text, reserve, hovered, in_group, sizes.get());
             }
         };
         // Clickable modules are buttons (FLTK handles the clicks, HeroUI the
@@ -969,15 +1024,14 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
             }
             was_hidden.set(hidden || m.absent);
             sizes.set(ModSizes::of(m));
-            *shown.borrow_mut() = (m.icon.clone(), m.text.clone());
+            *shown.borrow_mut() = (m.icon.clone(), m.text.clone(), m.reserve.clone());
 
             // Custom, Bluetooth and network modules may be just an icon.
             let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network);
-            // Changing numbers (network speeds) would make the module and
-            // its neighbors jitter: measured with every digit as "0", it
-            // only changes size when the number of digits or the unit does.
-            let measured = if m.jittery() { m.text.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect() } else { m.text.clone() };
-            let width = if hidden || m.absent { 0 } else { module_width(&m.icon, &measured, icon_only, sizes.get()) };
+            // Changing numbers (CPU %, network speeds) would make the
+            // module and its neighbors jitter: it's sized for its numbers
+            // at their widest.
+            let width = if hidden || m.absent { 0 } else { module_width(&m.icon, &m.text, &m.reserve, icon_only, sizes.get()) };
             if width != last_width.replace(width) {
                 fit::set_width(&mut w, width);
             }
@@ -1059,7 +1113,7 @@ fn drawer_toggle(g: usize, icon: String) -> Element<Bar, Msg> {
             move |b| {
                 let hovered = if b.value() || open.get() { 1.0 } else { hover_amount(b) };
                 let sz = ModSizes { padding: sizes.padding, icon: sizes.icon, font: None };
-                paint_module(b, &icon, "", hovered, true, sz);
+                paint_module(b, &icon, "", "", hovered, true, sz);
             }
         });
         let emit = ctx.emitter();
