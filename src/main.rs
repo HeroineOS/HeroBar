@@ -304,6 +304,7 @@ impl Bar {
                     Kind::Volume => (popups::volume_view(i), popups::volume_size),
                     Kind::Network => (popups::net_view(i), popups::net_size),
                     Kind::Clock => (popups::calendar_view(i), popups::calendar_size),
+                    Kind::Battery => (popups::battery_view(i), popups::battery_size),
                     _ => (popups::bt_view(i), popups::bt_size),
                 };
                 popover(

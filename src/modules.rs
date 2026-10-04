@@ -130,6 +130,8 @@ pub struct Module {
     pub font_size: Option<i32>,
     /// cpu: last (busy, total) jiffies
     last_cpu: (u64, u64),
+    /// battery: (percent, status, time to empty or full) at the last refresh
+    pub battery_info: Option<(u32, String, Option<String>)>,
     /// Nothing to show (no Bluetooth adapter): takes no space.
     pub absent: bool,
     /// network: the Wi-Fi network's name, from NetworkManager
@@ -149,6 +151,7 @@ impl Module {
             kind,
             text: String::new(),
             reserve: String::new(),
+            battery_info: None,
             tooltip: String::new(),
             icon: icon_cfg.clone().unwrap_or_else(|| kind.default_icon().to_owned()),
             icon_cfg,
@@ -315,7 +318,7 @@ impl Module {
             Kind::Battery => match self.battery.clone() {
                 Some(b) => {
                     let read = |f: &str| {
-                        std::fs::read_to_string(format!("/sys/class/power_supply/{b}/{f}"))
+                        std::fs::read_to_string(format!("{}/{b}/{f}", power_dir()))
                             .map(|s| s.trim().to_owned())
                             .unwrap_or_default()
                     };
@@ -340,6 +343,7 @@ impl Module {
                             (None, "Full") | (None, "Not charging") => format!("Battery: {level}%\nFully charged"),
                             (None, s) => format!("Battery: {level}%\n{s}"),
                         };
+                        self.battery_info = Some((level, status.clone(), time.clone()));
                         let widest_time = if time.is_some() { "00 h 00 min" } else { "" };
                         reserve = Some(fill(&self.format, &[("capacity", slot("100")), ("status", status.clone()), ("time", slot(widest_time))]));
                         fill(&self.format, &[("capacity", slot(capacity)), ("status", status), ("time", slot(time.unwrap_or_default()))])
@@ -527,13 +531,18 @@ fn meminfo() -> (u64, u64) {
     (field("MemAvailable:"), field("MemTotal:"))
 }
 
+/// Where batteries are (HEROBAR_POWER_SUPPLY replaces it, for testing).
+fn power_dir() -> String {
+    std::env::var("HEROBAR_POWER_SUPPLY").unwrap_or_else(|_| "/sys/class/power_supply".into())
+}
+
 fn first_battery() -> Option<String> {
-    let mut names: Vec<String> = std::fs::read_dir("/sys/class/power_supply")
+    let mut names: Vec<String> = std::fs::read_dir(power_dir())
         .ok()?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| {
-            std::fs::read_to_string(format!("/sys/class/power_supply/{n}/type")).is_ok_and(|t| t.trim() == "Battery")
+            std::fs::read_to_string(format!("{}/{n}/type", power_dir())).is_ok_and(|t| t.trim() == "Battery")
         })
         .collect();
     names.sort();

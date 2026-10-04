@@ -139,7 +139,7 @@ pub struct Module {
     pub tooltip: Option<bool>,
     /// clock: the first day of the week in its calendar: "monday" or "sunday"
     pub first_weekday: Option<String>,
-    /// volume, network, bluetooth, clock: a click opens a popup (default true);
+    /// volume, network, bluetooth, clock, battery: a click opens a popup (default true);
     /// false runs on-click instead. With the popup, on-click is its
     /// "Advanced" button.
     pub popup: Option<bool>,

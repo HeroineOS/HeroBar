@@ -1,4 +1,5 @@
-//! The volume, network and bluetooth popups: state, messages and views.
+//! The volume, network, bluetooth, battery and calendar popups: state,
+//! messages and views.
 //!
 //! A click on one of those modules opens its popup right under it (above
 //! it on a bottom bar), as a Wayland popup of the bar (HeroUI `popover`).
@@ -51,6 +52,11 @@ pub struct Sys {
     pub status: String,
     /// The calendar's month, relative to this one.
     pub cal_offset: i32,
+    /// Screen brightness in percent (None: can't be set here).
+    pub brightness: Option<u32>,
+    bright_busy: bool,
+    /// A brightness waiting for the previous change to finish.
+    bright_pending: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +91,9 @@ pub enum SysMsg {
     BtDevice(usize),
     /// Calendar: months forward/back (0: back to this month).
     CalShift(i32),
+    Brightness(Option<u32>),
+    SetBrightness(f64),
+    BrightnessDone(Result<(), String>),
 }
 
 fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
@@ -92,7 +101,7 @@ fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
 }
 
 pub fn has_popup(kind: Kind) -> bool {
-    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock)
+    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock | Kind::Battery)
 }
 
 /// The command behind "Advanced...": the module's on-click, else the
@@ -103,6 +112,7 @@ pub fn advanced(bar: &Bar, i: usize) -> String {
         match m.kind {
             Kind::Volume => "pavucontrol",
             Kind::Network => "nm-connection-editor",
+            Kind::Battery => "xfce4-power-manager-settings",
             _ => "blueman-manager",
         }
         .into()
@@ -135,6 +145,10 @@ impl Bar {
                 s.cal_offset = 0;
                 return match self.modules[i].kind {
                     Kind::Clock => Task::none(),
+                    Kind::Battery => {
+                        self.modules[i].refresh();
+                        task(|| SysMsg::Brightness(system::brightness()))
+                    }
                     Kind::Volume => task(|| SysMsg::Audio(system::audio())),
                     Kind::Network => {
                         s.scanning = true;
@@ -324,6 +338,35 @@ impl Bar {
                     Err(e) => e,
                 };
                 return task(|| SysMsg::Bt(system::bt()));
+            }
+            SysMsg::Brightness(b) => {
+                if !s.bright_busy {
+                    s.brightness = b;
+                }
+            }
+            SysMsg::SetBrightness(v) => {
+                // Never fully dark: the screen would look off.
+                let p = (v.round() as u32).clamp(1, 100);
+                if s.brightness == Some(p) {
+                    return Task::none();
+                }
+                s.brightness = Some(p);
+                if s.bright_busy {
+                    s.bright_pending = Some(p);
+                } else {
+                    s.bright_busy = true;
+                    return task(move || SysMsg::BrightnessDone(system::set_brightness(p)));
+                }
+            }
+            SysMsg::BrightnessDone(r) => {
+                s.bright_busy = false;
+                if let Err(e) = r {
+                    s.status = e;
+                }
+                if let Some(p) = s.bright_pending.take() {
+                    s.bright_busy = true;
+                    return task(move || SysMsg::BrightnessDone(system::set_brightness(p)));
+                }
             }
             SysMsg::CalShift(n) => s.cal_offset = if n == 0 { 0 } else { s.cal_offset + n },
             SysMsg::BtDevice(i) => {
@@ -558,6 +601,58 @@ pub fn volume_view(i: usize) -> Element<Bar, Msg> {
     ])
     .padding(12)
     .spacing(6)
+}
+
+/// The battery's level and time left, and the screen's brightness (like
+/// XFCE's power manager plugin).
+pub fn battery_view(i: usize) -> Element<Bar, Msg> {
+    type Info = (String, String, String);
+    let info = move |b: &Bar| -> Info {
+        let m = &b.modules[i];
+        let Some((level, status, time)) = &m.battery_info else { return (m.icon.clone(), "No battery".into(), String::new()) };
+        let detail = match (status.as_str(), time) {
+            ("Charging", Some(t)) => format!("Charging, full in {t}"),
+            (_, Some(t)) => format!("{t} left"),
+            ("Full", None) | ("Not charging", None) => "Fully charged".into(),
+            (s, None) => s.to_owned(),
+        };
+        (m.icon.clone(), format!("{level}%"), detail)
+    };
+    column(vec![
+        canvas(info, |(icon, level, detail): &Info, x, y, _w, h, t: &Theme| {
+            heroui::icons::draw(icon, x + 2, y + (h - 32) / 2, 32, t.text);
+            draw::set_font(t.bold_font(), t.font_size + 6);
+            draw::set_draw_color(t.text);
+            draw::draw_text2(level, x + 46, y + 2, 200, h / 2, Align::Left | Align::Inside);
+            draw::set_font(t.font(), t.font_size - 1);
+            draw::set_draw_color(t.text_dim);
+            draw::draw_text2(detail, x + 46, y + h / 2, 260, h / 2 - 2, Align::Left | Align::Inside);
+        })
+        .fixed(54),
+        heading_row("Screen brightness"),
+        row(vec![
+            icon(|_: &Bar| "brightness".to_string(), 20).fixed(34),
+            slider(1.0..=100.0, |b: &Bar| b.sys.brightness.unwrap_or(0) as f64, |v| Msg::Sys(SysMsg::SetBrightness(v))),
+            text(|b: &Bar| b.sys.brightness.map(|p| format!("{p}%")).unwrap_or_default()).fixed(44),
+        ])
+        .fixed(34)
+        .visible(|b: &Bar| b.sys.brightness.is_some()),
+        note(|b: &Bar| {
+            if b.sys.brightness.is_none() {
+                "No backlight to set (needs brightnessctl).".into()
+            } else {
+                b.sys.status.clone()
+            }
+        })
+        .fixed(22),
+        advanced_button(i, "Power settings..."),
+    ])
+    .padding(12)
+    .spacing(6)
+}
+
+pub fn battery_size(b: &Bar) -> (i32, i32) {
+    (WIDTH, if b.sys.brightness.is_some() { 12 + 54 + 30 + 34 + 22 + 34 + 5 * 6 + 12 } else { 12 + 54 + 30 + 22 + 34 + 4 * 6 + 12 })
 }
 
 pub fn volume_size(b: &Bar) -> (i32, i32) {

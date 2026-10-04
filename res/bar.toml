@@ -87,6 +87,9 @@ interval = 5
 # {capacity} (percent), {status}: Charging, Discharging, Full...,
 # {time}: until empty or full. The icon shows the level, or charging.
 # Hover: percent, status and time left. Hidden without a battery.
+# A click shows the time left and a screen brightness slider (needs
+# brightnessctl); popup = false turns it off, and on-click is then the
+# command to run instead ("Power settings..." in the popup otherwise).
 [modules.battery]
 format = "{capacity}%"
 interval = 30

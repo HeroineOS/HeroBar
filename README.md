@@ -40,7 +40,7 @@ itself; a config with errors is reported and ignored until fixed). Appearance ed
 | `clock` | date/time | strftime: `%H:%M`, `%a %d %b`... (`man 3 strftime`) |
 | `cpu` | CPU usage since the last update | `{usage}` |
 | `memory` | RAM in use | `{used}` `{total}` (GiB), `{percent}` |
-| `battery` | battery level (hidden without a battery) | `{capacity}` `{status}` |
+| `battery` | battery level (hidden without a battery); click: time left and screen brightness (brightnessctl) | `{capacity}` `{status}` |
 | `network` | interface of the default route | `{ifname}` `{state}` |
 | `volume` | default output volume, via wpctl or pactl (hidden without audio) | `{volume}` |
 | `taskbar` | pinned apps and open windows | (see below) |

@@ -377,6 +377,25 @@ pub fn bytes(n: f64) -> String {
     }
 }
 
+// --- Brightness -----------------------------------------------------------
+
+/// The screen's brightness in percent, from brightnessctl (None: no
+/// brightnessctl or no backlight).
+pub fn brightness() -> Option<u32> {
+    parse_brightness(&run("brightnessctl", &["-m", "-c", "backlight", "info"])?)
+}
+
+/// `brightnessctl -m info`: "intel_backlight,backlight,400,42%,937".
+fn parse_brightness(out: &str) -> Option<u32> {
+    out.lines().next()?.split(',').nth(3)?.trim().trim_end_matches('%').parse().ok()
+}
+
+/// Sets the screen's brightness (brightnessctl goes through logind when
+/// the user can't write the backlight).
+pub fn set_brightness(percent: u32) -> Result<(), String> {
+    act("brightnessctl", &["-q", "-c", "backlight", "set", &format!("{percent}%")])
+}
+
 // --- Bluetooth ------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -468,6 +487,12 @@ pub fn bt_do(cmd: &BtCmd) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brightness_info() {
+        assert_eq!(parse_brightness("intel_backlight,backlight,400,42%,937\n"), Some(42));
+        assert_eq!(parse_brightness(""), None);
+    }
 
     #[test]
     fn pactl_json() {
