@@ -152,24 +152,79 @@ pub fn new_folder(list: &mut Vec<Pinned>, id: &str, name: &str) {
 
 /// Puts the entry at `from` (or app `id`, pinning it) at the top level,
 /// before entry `before` (None: at the end).
+#[cfg(test)]
 pub fn place(list: &mut Vec<Pinned>, from: Option<PinPath>, id: &str, before: Option<usize>) {
+    put(list, from, id, &[], before);
+}
+
+/// Puts the entry at `from` (or app `id`, pinning it) in the folder at
+/// `dest` (`[]`: the top level), before its entry `before` (None: at the
+/// end). A folder can't go into itself.
+pub fn put(list: &mut Vec<Pinned>, from: Option<PinPath>, id: &str, dest: &[usize], before: Option<usize>) {
     let from = from.or_else(|| find(list, id));
+    let mut dest = dest.to_vec();
     let mut before = before;
     let entry = match &from {
         Some(p) => {
+            if dest.starts_with(p) {
+                return;
+            }
             let e = remove(list, p);
-            if let (1, Some(b)) = (p.len(), before.as_mut()) {
-                if p[0] < *b {
-                    *b -= 1;
+            let (&r, parent) = p.split_last().expect("non-empty");
+            if parent == dest.as_slice() {
+                if let Some(b) = before.as_mut() {
+                    if r < *b {
+                        *b -= 1;
+                    }
                 }
             }
+            dest = shifted(dest, p);
             e
         }
         None => Some(Pinned::App(id.to_owned())),
     };
-    if let Some(e) = entry {
-        let at = before.unwrap_or(list.len()).min(list.len());
-        list.insert(at, e);
+    let Some(e) = entry else { return };
+    let target = if dest.is_empty() { Some(list) } else { folder_mut(list, &dest).map(|f| &mut f.apps) };
+    if let Some(l) = target {
+        let at = before.unwrap_or(l.len()).min(l.len());
+        l.insert(at, e);
+    }
+}
+
+/// Drops the entry at `from` (or app `id`) onto the app at `target` (or,
+/// unpinned, app `target_id`, pinned at the end first): both go in a new
+/// folder `name` where the target was. Onto a folder: into it.
+pub fn merge(list: &mut Vec<Pinned>, from: Option<PinPath>, id: &str, target: Option<PinPath>, target_id: &str, name: &str) {
+    let from = from.or_else(|| find(list, id));
+    let mut target = match target.or_else(|| find(list, target_id)) {
+        Some(t) => t,
+        None => {
+            list.push(Pinned::App(target_id.to_owned()));
+            vec![list.len() - 1]
+        }
+    };
+    if from.as_ref() == Some(&target) {
+        return;
+    }
+    let entry = match &from {
+        Some(p) => {
+            if target.starts_with(p) {
+                return;
+            }
+            let e = remove(list, p);
+            target = shifted(target, p);
+            e
+        }
+        None => Some(Pinned::App(id.to_owned())),
+    };
+    let Some(e) = entry else { return };
+    let Some((parent, i)) = parent_mut(list, &target) else { return };
+    match &mut parent[i] {
+        Pinned::Folder(f) => f.apps.push(e),
+        Pinned::App(_) => {
+            let old = parent[i].clone();
+            parent[i] = Pinned::Folder(Folder { folder: name.to_owned(), icon: None, apps: vec![old, e] });
+        }
     }
 }
 
@@ -258,6 +313,33 @@ mod tests {
         place(&mut l, Some(vec![0]), "gimp", Some(2));
         assert_eq!(l[1], Pinned::App("gimp".into()));
         assert_eq!(l[2], third);
+    }
+
+    #[test]
+    fn put_and_merge() {
+        let mut l = vec![app("a"), folder("F", vec![app("b"), app("c")]), app("d")];
+        // c out of F, before d.
+        put(&mut l, Some(vec![1, 1]), "c", &[], Some(2));
+        assert_eq!(l, vec![app("a"), folder("F", vec![app("b")]), app("c"), app("d")]);
+        // a into F, first: F's path shifts as a leaves.
+        put(&mut l, Some(vec![0]), "a", &[1], Some(0));
+        assert_eq!(l, vec![folder("F", vec![app("a"), app("b")]), app("c"), app("d")]);
+        // Reorder within F.
+        put(&mut l, Some(vec![0, 0]), "a", &[0], None);
+        assert_eq!(l[0], folder("F", vec![app("b"), app("a")]));
+        // A folder never goes into itself.
+        put(&mut l, Some(vec![0]), "", &[0], None);
+        assert_eq!(l.len(), 3);
+        // d onto c: a new folder where c was.
+        merge(&mut l, Some(vec![2]), "d", Some(vec![1]), "c", "New folder");
+        assert_eq!(l, vec![folder("F", vec![app("b"), app("a")]), folder("New folder", vec![app("c"), app("d")])]);
+        // b (from F) onto an unpinned running app.
+        merge(&mut l, Some(vec![0, 0]), "b", None, "mpv", "New folder");
+        assert_eq!(l[2], folder("New folder", vec![app("mpv"), app("b")]));
+        assert_eq!(l[0], folder("F", vec![app("a")]));
+        // Onto a folder: into it.
+        merge(&mut l, None, "gimp", Some(vec![0]), "", "x");
+        assert_eq!(l[0], folder("F", vec![app("a"), app("gimp")]));
     }
 
     #[test]

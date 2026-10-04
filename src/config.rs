@@ -121,6 +121,9 @@ pub struct Module {
     pub button_width: Option<i32>,
     /// taskbar: windows of "all" workspaces or only the "current" one
     pub workspace: Option<String>,
+    /// taskbar: how an open folder shows its apps: "list", "grid" (icons
+    /// with names) or "icons"
+    pub folder_style: Option<String>,
     /// workspaces: which monitor's workspaces (default: the active one)
     pub output: Option<String>,
     /// spacer: width in pixels
@@ -234,6 +237,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             Kind::Taskbar => {
                 one_of(name, "show", &m.show, &["running", "pinned", "both"])?;
                 one_of(name, "style", &m.style, &["icons", "icons-titles"])?;
+                one_of(name, "folder-style", &m.folder_style, &["list", "grid", "icons"])?;
                 one_of(name, "workspace", &m.workspace, &["all", "current"])?;
             }
             Kind::Workspaces => one_of(name, "show", &m.show, &["all", "occupied"])?,

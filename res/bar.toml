@@ -115,7 +115,9 @@ show = "all"             # "all", or "occupied" (with windows, plus the shown on
 # Open windows and pinned apps. Click: open/focus (again: next window of the
 # app); middle click: close the window; right click: pin/unpin, move to a
 # folder, close... (the bar edits this file itself, keeping comments).
-# Press and hold a button to drag it somewhere else, or onto a folder.
+# Press and hold a button to drag it somewhere else, or onto a folder; hold
+# it over another app for a moment to make a folder of the two. Apps in an
+# open folder can be dragged too: around in it, or out onto the taskbar.
 # Folders keep pinned apps tidy: { folder = "Games", apps = ["steam", ...] }
 # (folders in folders too; icon = "..." instead of small icons of its apps).
 # A click on a folder opens it; running apps pinned in a folder stay in it.
@@ -130,6 +132,8 @@ max-width = 600          # The most room it takes; buttons shrink to fit
 fixed-width = false      # true: always max-width, so other modules never move
 button-width = 180       # icons-titles: the widest a window button gets
 workspace = "all"        # "current": only windows on the current workspace
+folder-style = "list"    # Open folders: "list", "grid" (icons with names, like
+                         # a phone's folders) or "icons" (icons only)
 
 # Groups show their modules together on one background (one island), e.g.
 # CPU and memory as one. drawer = true collapses a group to its icon; a
