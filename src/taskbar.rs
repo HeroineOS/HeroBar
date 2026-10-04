@@ -320,6 +320,9 @@ pub enum TaskAction {
     Dissolve(PinPath),
     Close(Vec<u64>),
     Launch(String),
+    /// Put a pinned entry (its path) or an app at the top level, before
+    /// pinned entry n (None: after the last).
+    Place(Option<PinPath>, String, Option<usize>),
 }
 
 /// The right-click menu of `item`: labels ("-" first: a line above) and
@@ -448,8 +451,17 @@ struct View {
     style: TaskStyle,
     button_width: i32,
     hover: crate::fade::HoverFade,
-    pressed: Option<(usize, i32)>,
+    /// The button pressed (index, mouse button), and where.
+    pressed: Option<(usize, i32, i32)>,
+    /// Bumped by every press: a long-press timer of an older press does
+    /// nothing.
+    press_id: u32,
+    /// Picked up by a long press: (index, pointer x in the widget).
+    drag: Option<(usize, i32)>,
 }
+
+/// How long a press must last to pick a button up and move it.
+const HOLD: f64 = 0.45;
 
 impl View {
     /// Button widths in `w` px (the width the taskbar actually got).
@@ -464,8 +476,9 @@ impl View {
         (x, ws.get(i).copied().unwrap_or(0))
     }
 
-    fn at(&self, x0: i32, w: i32, px: i32) -> Option<usize> {
-        let mut x = x0;
+    /// The button at `px` (offset in the widget).
+    fn at(&self, w: i32, px: i32) -> Option<usize> {
+        let mut x = 0;
         for (i, w) in self.layout(w).iter().enumerate() {
             if px >= x && px < x + w {
                 return Some(i);
@@ -474,38 +487,106 @@ impl View {
         }
         None
     }
+
+    /// Where a dragged button dropped at `px` goes: before button `k`
+    /// (`items.len()`: at the end), or into the folder at `k`.
+    fn drop_at(&self, w: i32, px: i32, from: usize) -> Drop {
+        let ws = self.layout(w);
+        let mut x = 0;
+        for (k, bw) in ws.iter().enumerate() {
+            if k != from {
+                // The middle of a folder: into it.
+                if self.items[k].folder.is_some() && self.items[from].folder.is_none() && px >= x + bw / 4 && px < x + bw * 3 / 4 {
+                    return Drop::Into(k);
+                }
+                if px < x + bw / 2 {
+                    return Drop::Before(k);
+                }
+            }
+            x += bw + GAP;
+        }
+        Drop::Before(self.items.len())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Drop {
+    Before(usize),
+    Into(usize),
+}
+
+/// What dropping `item` (picked up from the taskbar) at `drop` does.
+fn drop_action(items: &[Item], from: usize, drop: Drop) -> Option<TaskAction> {
+    let item = items.get(from)?;
+    match drop {
+        Drop::Into(k) => {
+            let folder = items.get(k)?.folder.clone()?;
+            (!item.app_id.is_empty()).then(|| TaskAction::MoveTo(item.app_id.clone(), folder))
+        }
+        Drop::Before(k) if k == from || k == from + 1 => None,
+        Drop::Before(k) => {
+            // The top-level pinned entry it goes before (the end of the
+            // pinned ones if it's dropped among running apps).
+            let before = items[k.min(items.len())..].iter().find_map(|it| it.pinned.as_ref().or(it.folder.as_ref()).filter(|p| p.len() == 1).map(|p| p[0]));
+            let from_path = item.pinned.clone().or_else(|| item.folder.clone());
+            if from_path.is_none() && item.app_id.is_empty() {
+                return None;
+            }
+            Some(TaskAction::Place(from_path, item.app_id.clone(), before))
+        }
+    }
 }
 
 pub fn view(i: usize) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let v = Rc::new(RefCell::new(View { items: vec![], folders: vec![], style: TaskStyle::Icons, button_width: 180, hover: Default::default(), pressed: None }));
+        let v = Rc::new(RefCell::new(View {
+            items: vec![],
+            folders: vec![],
+            style: TaskStyle::Icons,
+            button_width: 180,
+            hover: Default::default(),
+            pressed: None,
+            press_id: 0,
+            drag: None,
+        }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
         {
             let v = v.clone();
-            f.draw(move |f| paint(&v.borrow(), f.x(), f.y(), f.w(), f.h()));
+            f.draw(move |f| {
+                // Never fails in practice: the handler doesn't hold the
+                // state while FLTK could draw.
+                if let Ok(v) = v.try_borrow() {
+                    paint(&v, f.x(), f.y(), f.w(), f.h());
+                }
+            });
         }
         let emit = ctx.emitter();
         {
             let v = v.clone();
+            // Rule here: borrow the state only between FLTK calls (a
+            // tooltip or a menu can run the event loop, which comes back
+            // into this handler).
             f.handle(move |f, ev| {
-                let px = app::event_x();
-                let mut s = v.borrow_mut();
+                let px = app::event_x() - f.x();
+                let me = f.as_base_widget();
                 match ev {
                     Event::Enter | Event::Move => {
-                        let h = s.at(f.x(), f.w(), px);
-                        if h != s.hover.cur {
-                            // Its name on hover (folders, apps).
-                            if let Some(t) = h.and_then(|k| tip(&s.items[k].name)) {
-                                let (bx, bw) = s.span(f.w(), h.unwrap_or(0));
-                                heroui::fltk::misc::Tooltip::enter_area(f, f.x() + bx, f.y(), bw, f.h(), t);
-                            }
+                        let (h, tipped) = {
+                            let s = v.borrow();
+                            let h = s.at(f.w(), px);
+                            let tipped = (h != s.hover.cur).then(|| h.and_then(|k| tip(&s.items[k].name).map(|t| (s.span(f.w(), k), t)))).flatten();
+                            (h, tipped)
+                        };
+                        // Its name on hover (folders, apps), centered under it.
+                        if let Some(((bx, bw), t)) = tipped {
+                            heroui::fltk::misc::Tooltip::enter_area(f, bx, 0, bw, f.h(), t);
                         }
-                        s.hover.set(h, &f.as_base_widget());
+                        v.borrow_mut().hover.set(h, &me);
                         true
                     }
                     Event::Leave => {
-                        s.hover.set(None, &f.as_base_widget());
+                        v.borrow_mut().hover.set(None, &me);
                         true
                     }
                     Event::Push => {
@@ -514,29 +595,80 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
                             MouseButton::Right => 3,
                             _ => 1,
                         };
-                        s.pressed = s.at(f.x(), f.w(), px).map(|i| (i, button));
+                        let (hit, menu_args, id) = {
+                            let mut s = v.borrow_mut();
+                            let hit = s.at(f.w(), px);
+                            s.press_id = s.press_id.wrapping_add(1);
+                            s.pressed = hit.map(|k| (k, button, px));
+                            let menu_args = (button == 3).then(|| hit.and_then(|k| s.items.get(k).map(|it| (k, menu(it, &s.folders), s.span(f.w(), k))))).flatten();
+                            (hit, menu_args, s.press_id)
+                        };
+                        // Right button: its menu, opened on the press like
+                        // the other popups.
+                        if let Some((_, (labels, acts), (bx, bw))) = menu_args {
+                            emit(Msg::OpenMenu(crate::TaskMenu { module: i, row: None, labels, acts, rect: (bx, 0, bw, f.h()) }));
+                            v.borrow_mut().pressed = None;
+                            return true;
+                        }
+                        // Held long enough without moving: picked up.
+                        if hit.is_some() && button == 1 {
+                            let (v, mut w) = (v.clone(), me.clone());
+                            app::add_timeout3(HOLD, move |_| {
+                                let mut s = v.borrow_mut();
+                                if s.press_id == id {
+                                    if let Some((k, 1, x)) = s.pressed {
+                                        if k < s.items.len() {
+                                            s.drag = Some((k, x));
+                                            s.hover.clear();
+                                            drop(s);
+                                            repaint(&mut w);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        true
+                    }
+                    Event::Drag => {
+                        let mut s = v.borrow_mut();
+                        if let Some((k, _)) = s.drag {
+                            s.drag = Some((k, px));
+                            drop(s);
+                            let mut w = me.clone();
+                            repaint(&mut w);
+                        } else if let Some((_, _, x0)) = s.pressed {
+                            // Moved before the hold: not a pick-up (nor a click).
+                            if (px - x0).abs() > 8 {
+                                s.pressed = None;
+                            }
+                        }
                         true
                     }
                     Event::Released => {
-                        let Some((idx, button)) = s.pressed.take() else { return true };
-                        if s.at(f.x(), f.w(), px) != Some(idx) {
+                        let (drag, pressed, act, item) = {
+                            let mut s = v.borrow_mut();
+                            let drag = s.drag.take();
+                            let pressed = s.pressed.take();
+                            s.press_id = s.press_id.wrapping_add(1);
+                            let act = drag.and_then(|(k, _)| drop_action(&s.items, k, s.drop_at(f.w(), px, k)));
+                            let item = pressed.and_then(|(k, b, _)| (s.at(f.w(), px) == Some(k)).then(|| (k, b, s.items.get(k).cloned(), s.span(f.w(), k))));
+                            (drag, pressed, act, item)
+                        };
+                        if drag.is_some() {
+                            if let Some(a) = act {
+                                emit(Msg::TaskAction(i, a));
+                            }
+                            let mut w = me.clone();
+                            repaint(&mut w);
                             return true;
                         }
-                        let Some(item) = s.items.get(idx).cloned() else { return true };
-                        if button == 3 {
-                            // The menu runs its own event loop: let go of
-                            // the state first.
-                            let (labels, acts) = menu(&item, &s.folders);
-                            drop(s);
-                            let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                            if let Some(k) = heroui::popup::context_menu(&refs) {
-                                emit(Msg::TaskAction(i, acts[k].clone()));
+                        let _ = pressed;
+                        if let Some((_, button, Some(item), (bx, bw))) = item {
+                            if let (Some(path), 1) = (&item.folder, button) {
+                                emit(Msg::OpenFolder(i, path.clone(), (bx, 0, bw, f.h())));
+                            } else {
+                                emit(Msg::Task(item, button));
                             }
-                        } else if let (Some(path), 1) = (&item.folder, button) {
-                            let (bx, bw) = s.span(f.w(), idx);
-                            emit(Msg::OpenFolder(i, path.clone(), (bx, 0, bw, f.h())));
-                        } else {
-                            emit(Msg::Task(item, button));
                         }
                         true
                     }
@@ -568,6 +700,7 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
             s.style = cfg.style;
             s.button_width = cfg.button_width;
             s.hover.clear();
+            s.drag = None;
             drop(s);
             if width != last_width.replace(width) {
                 crate::fit::set_width(&mut w, width);
@@ -578,62 +711,94 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
     })
 }
 
+/// Draws one button at (bx, by).
+fn paint_item(v: &View, idx: usize, item: &Item, bx: i32, by: i32, bw: i32, bh: i32, lifted: bool) {
+    let t = heroui::theme::current();
+    let icon = icon_px();
+    let running = !item.windows.is_empty();
+    let under = if crate::islands_on() { crate::island_color() } else { t.background };
+    let bg = if lifted {
+        Some(mix(t.surface_alt, t.accent, 0.35))
+    } else if item.focused {
+        Some(mix(t.surface_alt, t.accent, 0.18))
+    } else if v.hover.amount(idx) > 0.0 {
+        Some(mix(under, t.surface_alt, v.hover.amount(idx)))
+    } else {
+        None
+    };
+    if let Some(bg) = bg {
+        draw::set_draw_color(bg);
+        draw::draw_rounded_rectf(bx, by, bw, bh, t.radius.min(bh / 2).min(8));
+    }
+    let iy = by + (bh - icon) / 2 - if running { 1 } else { 0 };
+    let titled = !item.label.is_empty();
+    let ix = if titled { bx + BTN_PAD } else { bx + (bw - icon) / 2 };
+    if item.folder.is_some() && item.icon.is_empty() {
+        paint_minis(&item.minis, ix, iy, icon);
+    } else if !heroui::icons::draw(&item.icon, ix, iy, icon, t.text) {
+        heroui::icons::draw("app", ix, iy, icon, t.text);
+    }
+    if titled {
+        let tx = ix + icon + 6;
+        let tw = bx + bw - BTN_PAD - tx;
+        if tw > 8 {
+            draw::set_draw_color(if item.focused { t.text } else { mix(t.text, t.background, 0.15) });
+            draw::draw_text2(&fit(&item.label, tw), tx, by, tw, bh, Align::Left | Align::Inside);
+        }
+    }
+    // Running windows: a dot each (up to 3); the focused app's is a bar.
+    if running && !lifted {
+        let dy = by + bh - 3;
+        if item.focused {
+            draw::set_draw_color(t.accent);
+            draw::draw_rounded_rectf(bx + bw / 2 - 7, dy, 14, 3, 1);
+        } else {
+            let n = item.windows.len().min(3) as i32;
+            let total = n * 4 + (n - 1) * 3;
+            draw::set_draw_color(mix(t.text, t.background, 0.4));
+            for k in 0..n {
+                draw::draw_rounded_rectf(bx + (bw - total) / 2 + k * 7, dy, 4, 3, 1);
+            }
+        }
+    }
+}
+
 fn paint(v: &View, x: i32, y: i32, w: i32, h: i32) {
     let t = heroui::theme::current();
     crate::island(x, y, w, h);
-    let icon = icon_px();
     let bh = h - 8;
     let by = y + 4;
     draw::push_clip(x, y, w, h);
-    let mut bx = x;
     draw::set_font(t.font(), t.font_size - 1);
-    for (idx, (item, &bw)) in v.items.iter().zip(&v.layout(w)).enumerate() {
-        let running = !item.windows.is_empty();
-        let under = if crate::islands_on() { crate::island_color() } else { t.background };
-        let hover = mix(under, t.surface_alt, v.hover.amount(idx));
-        let bg = if item.focused {
-            Some(mix(t.surface_alt, t.accent, 0.18))
-        } else if v.hover.amount(idx) > 0.0 {
-            Some(hover)
-        } else {
-            None
-        };
-        if let Some(bg) = bg {
-            draw::set_draw_color(bg);
-            draw::draw_rounded_rectf(bx, by, bw, bh, t.radius.min(bh / 2).min(8));
-        }
-        let iy = by + (bh - icon) / 2 - if running { 1 } else { 0 };
-        let titled = !item.label.is_empty();
-        let ix = if titled { bx + BTN_PAD } else { bx + (bw - icon) / 2 };
-        if item.folder.is_some() && item.icon.is_empty() {
-            paint_minis(&item.minis, ix, iy, icon);
-        } else if !heroui::icons::draw(&item.icon, ix, iy, icon, t.text) {
-            heroui::icons::draw("app", ix, iy, icon, t.text);
-        }
-        if titled {
-            let tx = ix + icon + 6;
-            let tw = bx + bw - BTN_PAD - tx;
-            if tw > 8 {
-                draw::set_draw_color(if item.focused { t.text } else { mix(t.text, t.background, 0.15) });
-                draw::draw_text2(&fit(&item.label, tw), tx, by, tw, bh, Align::Left | Align::Inside);
+    let ws = v.layout(w);
+    let drag = v.drag;
+    // While a button is carried, the others close the gap and open one
+    // where it would land.
+    let target = drag.map(|(k, px)| (k, v.drop_at(w, px, k)));
+    let mut bx = x;
+    for (idx, (item, &bw)) in v.items.iter().zip(&ws).enumerate() {
+        if let Some((k, d)) = target {
+            if d == Drop::Before(idx) {
+                bx += ws[k] + GAP;
             }
-        }
-        // Running windows: a dot each (up to 3); the focused app's is a bar.
-        if running {
-            let dy = by + bh - 3;
-            if item.focused {
+            if idx == k {
+                continue;
+            }
+            if d == Drop::Into(idx) {
+                // A ring: it goes in here.
                 draw::set_draw_color(t.accent);
-                draw::draw_rounded_rectf(bx + bw / 2 - 7, dy, 14, 3, 1);
-            } else {
-                let n = item.windows.len().min(3) as i32;
-                let total = n * 4 + (n - 1) * 3;
-                draw::set_draw_color(mix(t.text, t.background, 0.4));
-                for k in 0..n {
-                    draw::draw_rounded_rectf(bx + (bw - total) / 2 + k * 7, dy, 4, 3, 1);
-                }
+                draw::draw_rounded_rect(bx - 1, by - 1, bw + 2, bh + 2, t.radius.min(bh / 2).min(8));
             }
         }
+        paint_item(v, idx, item, bx, by, bw, bh, false);
         bx += bw + GAP;
+    }
+    // The carried button follows the pointer, a bit raised.
+    if let Some((k, px)) = drag {
+        if let (Some(item), Some(&bw)) = (v.items.get(k), ws.get(k)) {
+            let cx = (x + px - bw / 2).clamp(x, x + w - bw);
+            paint_item(v, k, item, cx, by - 2, bw, bh, true);
+        }
     }
     draw::pop_clip();
 }
@@ -798,19 +963,21 @@ fn folder_row(k: usize) -> Element<Bar, Msg> {
                 draw::draw_text2(&note, b.x(), b.y(), b.w() - 10, b.h(), Align::Right | Align::Inside);
             }
         });
+        // Called on press and on release (press_button): the menu opens on
+        // the right button's press (Wayland popups need one), a left click
+        // acts on release.
+        b.set_trigger(heroui::fltk::enums::CallbackTrigger::Changed);
         let emit = ctx.emitter();
         {
             let cur = cur.clone();
             let folders = folders.clone();
-            b.set_callback(move |_| {
+            b.set_callback(move |b| {
+                let right = app::event_mouse_button() == MouseButton::Right;
                 let Some(it) = cur.borrow().clone() else { return };
-                if app::event_mouse_button() == MouseButton::Right {
+                if right && b.value() {
                     let (labels, acts) = menu(&it, &folders.borrow());
-                    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                    if let Some(c) = heroui::popup::context_menu(&refs) {
-                        emit(Msg::TaskAction(usize::MAX, acts[c].clone()));
-                    }
-                } else {
+                    emit(Msg::OpenMenu(crate::TaskMenu { module: usize::MAX, row: Some(k), labels, acts, rect: (0, 0, b.w(), b.h()) }));
+                } else if !right && !b.value() && app::event() == Event::Released {
                     emit(Msg::FolderEntry(k));
                 }
             });
@@ -828,6 +995,18 @@ fn folder_row(k: usize) -> Element<Bar, Msg> {
         });
         b.as_base_widget()
     })
+}
+
+/// Row `k` of the folder popup, with its right-click menu.
+fn folder_entry(k: usize) -> Element<Bar, Msg> {
+    popover_at(
+        folder_row(k),
+        |_: &Bar| None,
+        move |b: &Bar| b.menu.as_ref().is_some_and(|m| m.row == Some(k)),
+        Msg::CloseMenu,
+        crate::menu_size,
+        crate::menu_view(),
+    )
     .fixed(ROW)
 }
 
@@ -842,7 +1021,7 @@ pub fn folder_view() -> Element<Bar, Msg> {
             }),
         ])
         .fixed(34),
-        scroll(vec![list(|b: &Bar| open_entries(b).len(), folder_row)]),
+        scroll(vec![list(|b: &Bar| open_entries(b).len(), folder_entry)]),
     ])
     .padding(12)
     .spacing(6)

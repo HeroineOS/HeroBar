@@ -61,6 +61,21 @@ struct Bar {
     started: bool,
     /// The taskbar folder whose popup is open.
     folder: Option<taskbar::OpenFolder>,
+    /// A taskbar right-click menu that's open.
+    menu: Option<TaskMenu>,
+}
+
+/// A taskbar button's right-click menu.
+#[derive(Debug, Clone)]
+pub struct TaskMenu {
+    /// The taskbar module.
+    pub module: usize,
+    /// Opened from row `n` of the open folder's popup (else the bar).
+    pub row: Option<usize>,
+    pub labels: Vec<String>,
+    pub acts: Vec<taskbar::TaskAction>,
+    /// Where it opens, relative to the taskbar (or the row).
+    pub rect: (i32, i32, i32, i32),
 }
 
 /// Modules from `config`, reusing `old` ones with the same name and
@@ -160,6 +175,10 @@ enum Msg {
     FolderEntry(usize),
     FolderBack,
     CloseFolder,
+    OpenMenu(TaskMenu),
+    /// Item `k` of the open menu.
+    MenuPick(usize),
+    CloseMenu,
 }
 
 impl Bar {
@@ -183,6 +202,7 @@ impl Bar {
             pending: None,
             started: false,
             folder: None,
+            menu: None,
         }
     }
 
@@ -250,12 +270,19 @@ impl Bar {
         let in_group = self.parent[i].is_some();
         match m.kind {
             Kind::Taskbar => popover_at(
-                taskbar::view(i),
-                |b: &Bar| b.folder.as_ref().map(|f| f.rect),
-                move |b: &Bar| b.folder.as_ref().is_some_and(|f| f.module == i),
-                Msg::CloseFolder,
-                taskbar::folder_size,
-                taskbar::folder_view(),
+                popover_at(
+                    taskbar::view(i),
+                    |b: &Bar| b.folder.as_ref().map(|f| f.rect),
+                    move |b: &Bar| b.folder.as_ref().is_some_and(|f| f.module == i),
+                    Msg::CloseFolder,
+                    taskbar::folder_size,
+                    taskbar::folder_view(),
+                ),
+                |b: &Bar| b.menu.as_ref().map(|m| m.rect),
+                move |b: &Bar| b.menu.as_ref().is_some_and(|m| m.module == i && m.row.is_none()),
+                Msg::CloseMenu,
+                menu_size,
+                menu_view(),
             ),
             Kind::Workspaces => workspaces::view(i, m.font_size, in_group),
             Kind::Spacer => spacer_view(&m.cfg, center || in_group),
@@ -382,6 +409,14 @@ impl App for Bar {
                 };
             }
             Msg::CloseFolder => self.folder = None,
+            Msg::OpenMenu(m) => self.menu = Some(m),
+            Msg::CloseMenu => self.menu = None,
+            Msg::MenuPick(k) => {
+                let Some(m) = self.menu.take() else { return Task::none() };
+                let Some(act) = m.acts.get(k).cloned() else { return Task::none() };
+                let module = if m.row.is_some() { usize::MAX } else { m.module };
+                return self.update(Msg::TaskAction(module, act));
+            }
             Msg::FolderBack => {
                 if let Some(f) = &mut self.folder {
                     f.path.pop();
@@ -426,6 +461,7 @@ impl App for Bar {
                         false
                     }
                     A::Launch(cmd) => return Self::launch(cmd),
+                    A::Place(from, id, before) => edit(&|l| edit::place(l, from.clone(), &id, before)),
                 };
                 if changed {
                     self.folder = None;
@@ -779,6 +815,72 @@ fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, hovered: f32, in_gro
             }
         }
     }
+}
+
+/// The open taskbar menu: a list of its items.
+fn menu_view() -> Element<Bar, Msg> {
+    column(vec![list(
+        |b: &Bar| b.menu.as_ref().map_or(0, |m| m.labels.len()),
+        |k| {
+            Element::new(move |ctx| {
+                let label = Rc::new(RefCell::new(String::new()));
+                let mut b = custom_button({
+                    let label = label.clone();
+                    move |b| {
+                        let t = heroui::theme::current();
+                        let l = label.borrow();
+                        let (line, text) = match l.strip_prefix('-') {
+                            Some(t) => (true, t),
+                            None => (false, l.as_str()),
+                        };
+                        let top = if line { 7 } else { 0 };
+                        if line {
+                            draw::set_draw_color(t.border);
+                            draw::draw_line(b.x() + 6, b.y() + 3, b.x() + b.w() - 6, b.y() + 3);
+                        }
+                        let a = if b.value() { 1.0 } else { hover_amount(b) };
+                        if a > 0.0 {
+                            draw::set_draw_color(heroui::widgets::mix(t.background, t.surface_alt, a));
+                            draw::draw_rounded_rectf(b.x(), b.y() + top, b.w(), b.h() - top, t.radius.min(8));
+                        }
+                        draw::set_draw_color(t.text);
+                        draw::set_font(t.font(), t.font_size);
+                        draw::draw_text2(text, b.x() + 10, b.y() + top, b.w() - 20, b.h() - top, Align::Left | Align::Inside);
+                    }
+                });
+                let emit = ctx.emitter();
+                b.set_callback(move |_| emit(Msg::MenuPick(k)));
+                let mut w = b.clone();
+                ctx.bind(move |bar: &Bar| {
+                    let l = bar.menu.as_ref().and_then(|m| m.labels.get(k).cloned()).unwrap_or_default();
+                    if *label.borrow() != l {
+                        *label.borrow_mut() = l;
+                        repaint(&mut w);
+                    }
+                });
+                b.as_base_widget()
+            })
+            .fixed_with(move |b: &Bar| {
+                let line = b.menu.as_ref().and_then(|m| m.labels.get(k)).is_some_and(|l| l.starts_with('-'));
+                MENU_ROW + if line { 7 } else { 0 }
+            })
+        },
+    )])
+    .padding(6)
+    .spacing(0)
+}
+
+const MENU_ROW: i32 = 30;
+
+fn menu_size(b: &Bar) -> (i32, i32) {
+    let Some(m) = &b.menu else { return (200, 40) };
+    let t = heroui::theme::current();
+    draw::set_font(t.font(), t.font_size);
+    let w = m.labels.iter().map(|l| draw::width(l.trim_start_matches('-')).ceil() as i32).max().unwrap_or(100) + 32;
+    let lines = m.labels.iter().filter(|l| l.starts_with('-')).count() as i32;
+    let gap = t.spacing;
+    let n = m.labels.len() as i32;
+    (w.max(160), 12 + n * MENU_ROW + (n - 1).max(0) * gap + lines * 7)
 }
 
 /// A popup's size from the state.

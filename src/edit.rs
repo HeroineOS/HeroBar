@@ -150,6 +150,29 @@ pub fn new_folder(list: &mut Vec<Pinned>, id: &str, name: &str) {
     }
 }
 
+/// Puts the entry at `from` (or app `id`, pinning it) at the top level,
+/// before entry `before` (None: at the end).
+pub fn place(list: &mut Vec<Pinned>, from: Option<PinPath>, id: &str, before: Option<usize>) {
+    let from = from.or_else(|| find(list, id));
+    let mut before = before;
+    let entry = match &from {
+        Some(p) => {
+            let e = remove(list, p);
+            if let (1, Some(b)) = (p.len(), before.as_mut()) {
+                if p[0] < *b {
+                    *b -= 1;
+                }
+            }
+            e
+        }
+        None => Some(Pinned::App(id.to_owned())),
+    };
+    if let Some(e) = entry {
+        let at = before.unwrap_or(list.len()).min(list.len());
+        list.insert(at, e);
+    }
+}
+
 /// Moves the entry at `path` out of its folder, right after the folder.
 pub fn move_out(list: &mut Vec<Pinned>, path: &[usize]) {
     if path.len() < 2 {
@@ -224,6 +247,17 @@ mod tests {
         assert!(find(&l, "mpv").is_none());
         pin(&mut l, "mpv");
         assert_eq!(find(&l, "mpv"), Some(vec![l.len() - 1]));
+        // Drag mpv to the front, then an unpinned app before it.
+        let at = find(&l, "mpv");
+        place(&mut l, at, "mpv", Some(0));
+        assert_eq!(find(&l, "mpv"), Some(vec![0]));
+        place(&mut l, None, "gimp", Some(0));
+        assert_eq!(find(&l, "gimp"), Some(vec![0]));
+        // Forward: lands before what was at index 2.
+        let third = l[2].clone();
+        place(&mut l, Some(vec![0]), "gimp", Some(2));
+        assert_eq!(l[1], Pinned::App("gimp".into()));
+        assert_eq!(l[2], third);
     }
 
     #[test]
