@@ -115,6 +115,7 @@ show = "all"             # "all", or "occupied" (with windows, plus the shown on
 # Open windows and pinned apps. Click: open/focus (again: next window of the
 # app); middle click: close the window; right click: pin/unpin, move to a
 # folder, close... (the bar edits this file itself, keeping comments).
+# Press and hold a button to drag it somewhere else, or onto a folder.
 # Folders keep pinned apps tidy: { folder = "Games", apps = ["steam", ...] }
 # (folders in folders too; icon = "..." instead of small icons of its apps).
 # A click on a folder opens it; running apps pinned in a folder stay in it.

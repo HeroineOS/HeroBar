@@ -77,7 +77,7 @@ dependencies = [
 [[package]]
 name = "fltk-sys"
 version = "1.5.23"
-source = "git+https://github.com/HeroineOS/fltk-sys#82e3eb53dea7a17cd51fba637876cc8ff79a48b3"
+source = "git+https://github.com/HeroineOS/fltk-sys#d9b2c5733c6db20d682eaae733f136c00aed9b2c"
 dependencies = [
  "cmake",
  "cmk",
@@ -91,7 +91,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "herobar"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "heroui",
  "serde",
@@ -102,8 +102,8 @@ dependencies = [
 
 [[package]]
 name = "heroui"
-version = "0.1.7"
-source = "git+https://github.com/HeroineOS/HeroUI#527670efd7763b1fcb0f52fc2984531ba31a0889"
+version = "0.1.8"
+source = "git+https://github.com/HeroineOS/HeroUI#9c973902a991a9e8e02179eea10504b9112b2d50"
 dependencies = [
  "fltk",
  "fltk-sys",
