@@ -63,6 +63,8 @@ struct Bar {
     folder: Option<taskbar::OpenFolder>,
     /// A taskbar right-click menu that's open.
     menu: Option<TaskMenu>,
+    /// A button carried out of the open folder, over the bar.
+    carry: Option<taskbar::CarryOut>,
 }
 
 /// A taskbar button's right-click menu.
@@ -70,11 +72,12 @@ struct Bar {
 pub struct TaskMenu {
     /// The taskbar module.
     pub module: usize,
-    /// Opened from row `n` of the open folder's popup (else the bar).
+    /// Opened from a button of the open folder's popup (Some), or of the
+    /// taskbar.
     pub row: Option<usize>,
     pub labels: Vec<String>,
     pub acts: Vec<taskbar::TaskAction>,
-    /// Where it opens, relative to the taskbar (or the row).
+    /// Where it opens, relative to the taskbar (or the folder's buttons).
     pub rect: (i32, i32, i32, i32),
 }
 
@@ -171,8 +174,13 @@ enum Msg {
     TaskAction(usize, taskbar::TaskAction),
     /// Open a taskbar folder (module, folder, button rectangle).
     OpenFolder(usize, edit::PinPath, (i32, i32, i32, i32)),
-    /// Entry `k` of the open folder was clicked.
-    FolderEntry(usize),
+    /// A button of the open folder was clicked.
+    FolderEntry(taskbar::Item),
+    /// A button carried out of the open folder is over the bar (None: back
+    /// in the folder).
+    CarryOut(Option<taskbar::CarryOut>),
+    /// ... and dropped there.
+    CarryDrop,
     FolderBack,
     CloseFolder,
     OpenMenu(TaskMenu),
@@ -203,6 +211,7 @@ impl Bar {
             started: false,
             folder: None,
             menu: None,
+            carry: None,
         }
     }
 
@@ -408,7 +417,17 @@ impl App for Bar {
                     _ => Some(taskbar::OpenFolder { module: i, path, rect }),
                 };
             }
-            Msg::CloseFolder => self.folder = None,
+            Msg::CloseFolder => {
+                self.folder = None;
+                self.carry = None;
+            }
+            Msg::CarryOut(c) => self.carry = c,
+            Msg::CarryDrop => {
+                self.carry = None;
+                if let Some((module, act)) = taskbar::take_out_drop() {
+                    return self.update(Msg::TaskAction(module, act));
+                }
+            }
             Msg::OpenMenu(m) => self.menu = Some(m),
             Msg::CloseMenu => self.menu = None,
             Msg::MenuPick(k) => {
@@ -422,8 +441,7 @@ impl App for Bar {
                     f.path.pop();
                 }
             }
-            Msg::FolderEntry(k) => {
-                let Some(item) = taskbar::open_item(self, k) else { return Task::none() };
+            Msg::FolderEntry(item) => {
                 if let (Some(f), Some(path)) = (&mut self.folder, item.folder.clone()) {
                     f.path = path;
                     return Task::none();
@@ -461,7 +479,8 @@ impl App for Bar {
                         false
                     }
                     A::Launch(cmd) => return Self::launch(cmd),
-                    A::Place(from, id, before) => edit(&|l| edit::place(l, from.clone(), &id, before)),
+                    A::Put(from, id, dest, before) => edit(&|l| edit::put(l, from.clone(), &id, &dest, before)),
+                    A::Merge(from, id, target, target_id) => edit(&|l| edit::merge(l, from.clone(), &id, target.clone(), &target_id, "New folder")),
                 };
                 if changed {
                     self.folder = None;
