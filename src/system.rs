@@ -363,17 +363,28 @@ pub fn traffic(ifname: &str) -> Option<(u64, u64)> {
 
 /// "512 B", "1.4 KB", "23 MB", "1.2 GB" (powers of 1000, like most UIs).
 pub fn bytes(n: f64) -> String {
+    // At most 3 digits ("9.9", "85", "999"), so the bar can keep a short,
+    // fixed room for speeds.
     let units = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n;
     let mut u = 0;
-    while v >= 1000.0 && u < units.len() - 1 {
+    while v >= 999.5 && u < units.len() - 1 {
         v /= 1000.0;
         u += 1;
     }
-    if u == 0 || v >= 100.0 {
+    if u == 0 || v >= 9.95 {
         format!("{v:.0} {}", units[u])
     } else {
         format!("{v:.1} {}", units[u])
+    }
+}
+
+/// Like [`bytes`], compact: "1.7K", "23M", "512B".
+pub fn bytes_short(n: f64) -> String {
+    let b = bytes(n);
+    match b.strip_suffix(" B") {
+        Some(num) => format!("{num}B"),
+        None => b.replace(' ', "").trim_end_matches('B').to_owned(),
     }
 }
 
@@ -528,7 +539,10 @@ mod tests {
         assert_eq!(parse_wireless(t, "wlan1"), None);
         assert_eq!(bytes(512.0), "512 B");
         assert_eq!(bytes(1430.0), "1.4 KB");
-        assert_eq!(bytes(23_400_000.0), "23.4 MB");
+        assert_eq!(bytes(23_400_000.0), "23 MB");
+        assert_eq!(bytes(9_960.0), "10 KB");
+        assert_eq!((bytes_short(1430.0).as_str(), bytes_short(512.0).as_str()), ("1.4K", "512B"));
+        assert_eq!(bytes(999_700.0), "1.0 MB");
         assert_eq!(bytes(234_000_000.0), "234 MB");
     }
 

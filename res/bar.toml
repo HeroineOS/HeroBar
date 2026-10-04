@@ -94,12 +94,17 @@ interval = 5
 format = "{capacity}%"
 interval = 30
 
-# Shows the interface the default route goes through.
-# {ifname} {state}: up, down, dormant...
+# Shows the connection the default route goes through.
+# {name} (Wi-Fi network or interface), {essid}, {ifname}, {state}: up,
+# down..., {signal} (Wi-Fi %), {down} {up} (speeds), {down-total}
+# {up-total} (since boot). E.g. "{icon:arrow-down}{down} {icon:arrow-up}{up}".
+# Numbers keep a fixed room, so the bar doesn't jitter as they change.
+# A click: Wi-Fi networks and connections (popup = false turns it off).
 [modules.network]
 format = "{ifname}"
 format-disconnected = "offline"
 interval = 5
+units = "long"           # Speeds: "long" (1.7 KB/s) or "short" (1.7K: narrower)
 
 # Volume of the default output through PipeWire (wpctl, from the wireplumber
 # package) or PulseAudio / pipewire-pulse (pactl). Hidden if neither works.

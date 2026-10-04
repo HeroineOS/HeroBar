@@ -41,7 +41,7 @@ itself; a config with errors is reported and ignored until fixed). Appearance ed
 | `cpu` | CPU usage since the last update | `{usage}` |
 | `memory` | RAM in use | `{used}` `{total}` (GiB), `{percent}` |
 | `battery` | battery level (hidden without a battery); click: time left and screen brightness (brightnessctl) | `{capacity}` `{status}` |
-| `network` | interface of the default route | `{ifname}` `{state}` |
+| `network` | connection of the default route; `units = "short"` for compact speeds (1.7K) | `{name}` `{essid}` `{ifname}` `{state}` `{signal}` `{down}` `{up}` `{down-total}` `{up-total}` |
 | `volume` | default output volume, via wpctl or pactl (hidden without audio) | `{volume}` |
 | `taskbar` | pinned apps and open windows | (see below) |
 | `workspaces` | the monitor's workspaces; click to switch, wheel to step | |

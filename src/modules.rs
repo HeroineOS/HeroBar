@@ -386,8 +386,11 @@ impl Module {
                         b(rx as f64),
                         b(tx as f64),
                     );
-                    // Speeds and totals at their widest ("00.0 MB"; "00.0"
-                    // is wider than "000").
+                    let short = self.cfg.units.as_deref() == Some("short");
+                    let speed = |v: f64| if short { crate::system::bytes_short(v) } else { format!("{}/s", b(v)) };
+                    let total = |v: f64| if short { crate::system::bytes_short(v) } else { b(v) };
+                    // Speeds and totals at their widest (3 digits, see
+                    // `system::bytes`).
                     reserve = Some(fill(
                         &self.format,
                         &[
@@ -396,10 +399,10 @@ impl Module {
                             ("ifname", ifname.clone()),
                             ("state", state.clone()),
                             ("signal", slot("100")),
-                            ("down", slot("00.0 MB/s")),
-                            ("up", slot("00.0 MB/s")),
-                            ("down-total", slot("00.0 GB")),
-                            ("up-total", slot("00.0 GB")),
+                            ("down", slot(if short { "000M" } else { "000 MB/s" })),
+                            ("up", slot(if short { "000M" } else { "000 MB/s" })),
+                            ("down-total", slot(if short { "000G" } else { "000 GB" })),
+                            ("up-total", slot(if short { "000G" } else { "000 GB" })),
                         ],
                     ));
                     fill(
@@ -410,10 +413,10 @@ impl Module {
                             ("ifname", ifname),
                             ("state", state),
                             ("signal", slot(signal.map(|s| s.to_string()).unwrap_or_default())),
-                            ("down", slot(format!("{}/s", b(down)))),
-                            ("up", slot(format!("{}/s", b(up)))),
-                            ("down-total", slot(b(rx as f64))),
-                            ("up-total", slot(b(tx as f64))),
+                            ("down", slot(speed(down))),
+                            ("up", slot(speed(up))),
+                            ("down-total", slot(total(rx as f64))),
+                            ("up-total", slot(total(tx as f64))),
                         ],
                     )
                 }

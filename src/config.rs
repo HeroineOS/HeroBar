@@ -139,6 +139,8 @@ pub struct Module {
     pub tooltip: Option<bool>,
     /// clock: the first day of the week in its calendar: "monday" or "sunday"
     pub first_weekday: Option<String>,
+    /// network: "long" ("1.7 KB/s") or "short" ("1.7K") speeds and totals
+    pub units: Option<String>,
     /// volume, network, bluetooth, clock, battery: a click opens a popup (default true);
     /// false runs on-click instead. With the popup, on-click is its
     /// "Advanced" button.
@@ -243,6 +245,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
             Kind::Workspaces => one_of(name, "show", &m.show, &["all", "occupied"])?,
             Kind::Spacer => one_of(name, "style", &m.style, &["none", "line", "dots"])?,
             Kind::Clock => one_of(name, "first-weekday", &m.first_weekday, &["monday", "sunday"])?,
+            Kind::Network => one_of(name, "units", &m.units, &["long", "short"])?,
             Kind::Group => {
                 for member in m.modules.iter().flatten() {
                     if matches!(check_name(member)?, Kind::Group) {
