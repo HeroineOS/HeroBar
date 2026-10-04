@@ -33,6 +33,9 @@ struct View {
     font: i32,
     hover: crate::fade::HoverFade,
     pressed: Option<usize>,
+    /// Where the highlight is, as a fractional index: it slides from the
+    /// old workspace to the new one.
+    slide: heroui::anim::Tween,
 }
 
 impl View {
@@ -58,14 +61,15 @@ impl View {
 
 pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let v = Rc::new(RefCell::new(View { list: vec![], font: 14, hover: Default::default(), pressed: None }));
+        let v = Rc::new(RefCell::new(View { list: vec![], font: 14, hover: Default::default(), pressed: None, slide: heroui::anim::Tween::new(-1.0) }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
         {
             let v = v.clone();
             f.draw(move |f| {
+                let Ok(v) = v.try_borrow() else { return };
                 draw::push_clip(f.x(), f.y(), f.w(), f.h());
-                paint(&v.borrow(), f.x(), f.y(), f.w(), f.h(), in_group);
+                paint(&v, f.x(), f.y(), f.w(), f.h(), in_group);
                 draw::pop_clip();
             });
         }
@@ -123,6 +127,18 @@ pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Ms
             if s.list == list && last_width.get() >= 0 {
                 return;
             }
+            // Same workspaces, another one shown: the highlight slides.
+            let ids = |l: &[Ws]| l.iter().map(|w| w.id).collect::<Vec<_>>();
+            let old = s.list.iter().position(|w| w.active);
+            let new = list.iter().position(|w| w.active);
+            match (old, new) {
+                (Some(_), Some(n)) if ids(&s.list) == ids(&list) && s.slide.get() >= 0.0 => {
+                    let mut w2 = w.clone();
+                    s.slide.animate_to(n as f64, std::time::Duration::from_millis(220), move || repaint(&mut w2));
+                }
+                (_, Some(n)) => s.slide.set(n as f64),
+                (_, None) => s.slide.set(-1.0),
+            }
             s.list = list;
             s.font = font_size.unwrap_or_else(|| heroui::theme::current().font_size);
             s.hover.clear();
@@ -146,26 +162,37 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32, in_group: bool) {
     let m = crate::margin();
     let (by, bh) = (y + m + 2, h - 2 * m - 4);
     draw::set_font(t.font(), v.font);
-    let mut bx = x + GAP;
-    for (idx, (ws, bw)) in v.list.iter().zip(v.widths(h)).enumerate() {
-        let r = t.radius.min(bh / 2);
-        if ws.active {
-            draw::set_draw_color(t.accent);
-            draw::draw_rounded_rectf(bx, by, bw, bh, r);
-        } else if v.hover.amount(idx) > 0.0 {
-            let under = if in_group || crate::islands_on() { crate::island_color() } else { t.background };
-            draw::set_draw_color(mix(under, t.surface_alt, v.hover.amount(idx)));
-            draw::draw_rounded_rectf(bx, by, bw, bh, r);
+    let widths = v.widths(h);
+    let xs: Vec<i32> = widths.iter().scan(x + GAP, |cx, bw| {
+        let here = *cx;
+        *cx += bw + GAP;
+        Some(here)
+    }).collect();
+    let r = t.radius.min(bh / 2);
+    let under = if in_group || crate::islands_on() { crate::island_color() } else { t.background };
+    // Hover backgrounds first, then the sliding highlight over them.
+    for idx in 0..v.list.len() {
+        let a = v.hover.amount(idx);
+        if a > 0.0 {
+            draw::set_draw_color(mix(under, t.surface_alt, a));
+            draw::draw_rounded_rectf(xs[idx], by, widths[idx], bh, r);
         }
-        draw::set_draw_color(if ws.active {
-            t.accent_text
-        } else if ws.occupied {
-            t.text
-        } else {
-            mix(t.text, t.background, 0.55)
-        });
-        draw::draw_text2(&ws.label, bx, by, bw, bh, Align::Center);
-        bx += bw + GAP;
+    }
+    let f = v.slide.get();
+    if f >= 0.0 && !v.list.is_empty() {
+        let i0 = (f.floor() as usize).min(v.list.len() - 1);
+        let i1 = (f.ceil() as usize).min(v.list.len() - 1);
+        let k = (f - f.floor()) as f32;
+        let lerp = |a: i32, b: i32| a + ((b - a) as f32 * k).round() as i32;
+        draw::set_draw_color(t.accent);
+        draw::draw_rounded_rectf(lerp(xs[i0], xs[i1]), by, lerp(widths[i0], widths[i1]), bh, r);
+    }
+    for (idx, ws) in v.list.iter().enumerate() {
+        let base = if ws.occupied { t.text } else { mix(t.text, t.background, 0.55) };
+        // Text under the highlight takes its color, as it passes.
+        let cover = if f >= 0.0 { (1.0 - (idx as f64 - f).abs()).max(0.0) as f32 } else { 0.0 };
+        draw::set_draw_color(mix(base, t.accent_text, cover));
+        draw::draw_text2(&ws.label, xs[idx], by, widths[idx], bh, Align::Center);
     }
 }
 

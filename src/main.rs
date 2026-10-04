@@ -626,6 +626,14 @@ thread_local! {
 /// Island style and sizes from the config, read while drawing.
 fn set_globals(config: &config::Config) {
     ISLANDS.with(|c| c.set(config.bar.islands.then_some(config.bar.island_style)));
+    // Popups get the corners of the bar's islands.
+    heroui::widgets::set_popover_radius(match (config.bar.islands, config.bar.island_style) {
+        (true, config::IslandStyle::Sharp) => Some(0),
+        (true, config::IslandStyle::Pill) => Some(16),
+        // Islands cap their rounding at 10 px; popups match.
+        (true, config::IslandStyle::Rounded) => Some(heroui::theme::current().radius.min(10)),
+        _ => None,
+    });
     let st = &config.style;
     let height = config.bar.height.max(1);
     SIZES.with(|c| {
@@ -965,13 +973,11 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
 
             // Custom, Bluetooth and network modules may be just an icon.
             let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network);
-            let mut width = if hidden || m.absent { 0 } else { module_width(&m.icon, &m.text, icon_only, sizes.get()) };
             // Changing numbers (network speeds) would make the module and
-            // its neighbors jitter: it grows at once but only shrinks when
-            // it's clearly narrower.
-            if m.jittery() && width > 0 && width < last_width.get() && width * 4 > last_width.get() * 3 {
-                width = last_width.get();
-            }
+            // its neighbors jitter: measured with every digit as "0", it
+            // only changes size when the number of digits or the unit does.
+            let measured = if m.jittery() { m.text.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect() } else { m.text.clone() };
+            let width = if hidden || m.absent { 0 } else { module_width(&m.icon, &measured, icon_only, sizes.get()) };
             if width != last_width.replace(width) {
                 fit::set_width(&mut w, width);
             }

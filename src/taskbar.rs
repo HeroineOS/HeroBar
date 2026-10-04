@@ -712,7 +712,7 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
 }
 
 /// Draws one button at (bx, by).
-fn paint_item(v: &View, idx: usize, item: &Item, bx: i32, by: i32, bw: i32, bh: i32, lifted: bool) {
+fn paint_item(v: &View, idx: usize, item: &Item, (bx, by, bw, bh): (i32, i32, i32, i32), lifted: bool) {
     let t = heroui::theme::current();
     let icon = icon_px();
     let running = !item.windows.is_empty();
@@ -790,14 +790,14 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32) {
                 draw::draw_rounded_rect(bx - 1, by - 1, bw + 2, bh + 2, t.radius.min(bh / 2).min(8));
             }
         }
-        paint_item(v, idx, item, bx, by, bw, bh, false);
+        paint_item(v, idx, item, (bx, by, bw, bh), false);
         bx += bw + GAP;
     }
     // The carried button follows the pointer, a bit raised.
     if let Some((k, px)) = drag {
         if let (Some(item), Some(&bw)) = (v.items.get(k), ws.get(k)) {
             let cx = (x + px - bw / 2).clamp(x, x + w - bw);
-            paint_item(v, k, item, cx, by - 2, bw, bh, true);
+            paint_item(v, k, item, (cx, by - 2, bw, bh), true);
         }
     }
     draw::pop_clip();
