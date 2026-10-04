@@ -589,7 +589,9 @@ fn carry_action(items: &[Item], c: &Carry, dest: &[usize]) -> Option<TaskAction>
     Some(TaskAction::Put(from_path, it.app_id.clone(), dest.to_vec(), before))
 }
 
-/// A button carried out of a folder popup, over the bar.
+/// A button carried out of a folder popup, over the bar. The popup stays
+/// open meanwhile: compositors keep sending a drag to the surface where
+/// it started (and some lose the release elsewhere).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CarryOut {
     /// The taskbar module whose folder it comes from.
@@ -857,21 +859,25 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
         let mut w = f.as_base_widget();
         let last_width = Cell::new(-1);
         let last_room = Cell::new(None);
+        let last_extra = Cell::new(0);
         ctx.bind(move |bar: &Bar| {
             let Some(cfg) = bar.modules[i].taskbar.as_ref() else { return };
             let items = if bar.gone(i) { vec![] } else { items(cfg, &bar.desktop.windows, bar.desktop.current_workspace()) };
-            carry_in(&v, &w, bar.carry.as_ref().filter(|c| c.module == i), i);
-            // Runs after every update; only the window list or the room
-            // the bar leaves (screen size) make it do anything.
+            // Room for a button carried in from a folder.
+            let extra = if carry_in(&v, &w, bar.carry.as_ref().filter(|c| c.module == i), i) { icon_px() + 2 * BTN_PAD + GAP } else { 0 };
+            // Runs after every update; only the window list, the room the
+            // bar leaves (screen size) or a carried button make it do
+            // anything.
             let room = crate::fit::room(&w);
             let mut s = v.borrow_mut();
-            if s.items == items && last_width.get() >= 0 && last_room.get() == room {
+            if s.items == items && last_width.get() >= 0 && last_room.get() == room && last_extra.get() == extra {
                 return;
             }
             last_room.set(room);
+            last_extra.set(extra);
             let ws = widths(&items, cfg.style, icon_px(), cfg.button_width, cfg.max_width);
             let natural = ws.iter().sum::<i32>() + GAP * (ws.len() as i32 - 1).max(0);
-            let want = if cfg.fixed_width { cfg.max_width } else { natural.min(cfg.max_width) };
+            let want = if cfg.fixed_width { cfg.max_width } else { natural.min(cfg.max_width) + extra };
             // Never into the next section (the clock): buttons shrink instead.
             let width = room.map_or(want, |r| want.min(r));
             s.items = items;
@@ -879,7 +885,9 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
             s.style = cfg.style;
             s.button_width = cfg.button_width;
             s.hover.clear();
-            s.drag = None;
+            if s.drag.as_ref().is_some_and(|d| d.from.is_some()) {
+                s.drag = None;
+            }
             drop(s);
             if width != last_width.replace(width) {
                 crate::fit::set_width(&mut w, width);
@@ -893,8 +901,8 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
 /// Follows a button carried out of a folder (`out`) over taskbar `module`
 /// (widget `w`): it makes room for it like for its own, and works out what
 /// dropping it would do.
-fn carry_in(v: &Rc<RefCell<View>>, w: &heroui::fltk::widget::Widget, out: Option<&CarryOut>, module: usize) {
-    let inside = out.filter(|o| o.at.0 >= w.x() && o.at.0 < w.x() + w.w() && o.at.1 >= w.y() - 4 && o.at.1 < w.y() + w.h() + 8);
+fn carry_in(v: &Rc<RefCell<View>>, w: &heroui::fltk::widget::Widget, out: Option<&CarryOut>, module: usize) -> bool {
+    let inside = out.filter(|o| o.at.0 >= w.x() - 8 && o.at.0 < w.x() + w.w() + 8 && o.at.1 >= w.y() - 4 && o.at.1 < w.y() + w.h() + 8);
     let mut s = v.borrow_mut();
     let external = s.drag.as_ref().is_some_and(|d| d.from.is_none());
     let Some(o) = inside else {
@@ -904,7 +912,7 @@ fn carry_in(v: &Rc<RefCell<View>>, w: &heroui::fltk::widget::Widget, out: Option
             OUT_DROP.with(|d| d.borrow_mut().take());
             repaint(&mut w.clone());
         }
-        return;
+        return false;
     };
     if !external {
         let n = s.items.len();
@@ -921,6 +929,7 @@ fn carry_in(v: &Rc<RefCell<View>>, w: &heroui::fltk::widget::Widget, out: Option
         arm_view_merge(v, w);
     }
     repaint(&mut w.clone());
+    true
 }
 
 /// Draws one button at (bx, by).
@@ -1505,10 +1514,10 @@ fn folder_grid() -> Element<Bar, Msg> {
                     Event::Drag => {
                         let mut s = v.borrow_mut();
                         if s.drag.is_some() {
-                            // Outside the popup: over the bar, maybe.
-                            let (ex, ey) = (app::event_x(), app::event_y());
-                            let win = f.window();
-                            let out = win.as_ref().is_some_and(|win| ex < 0 || ey < 0 || ex >= win.w() || ey >= win.h());
+                            // Outside the popup: over the bar, maybe. (The
+                            // compositor keeps sending the drag here.)
+                            let bar_at = heroui::widgets::popover_dragged_out(f);
+                            let out = bar_at.is_some();
                             let was_out = std::mem::replace(&mut s.out, out);
                             if let Some(c) = s.drag.as_mut() {
                                 c.at = p;
@@ -1517,10 +1526,8 @@ fn folder_grid() -> Element<Bar, Msg> {
                             let carried = s.drag.as_ref().map(|c| c.item.clone());
                             let module = s.module;
                             drop(s);
-                            if out {
-                                if let (Some((ox, oy)), Some(item)) = (heroui::widgets::popover_offset(f), carried) {
-                                    emit(Msg::CarryOut(Some(CarryOut { module, item, at: (ox + ex, oy + ey) })));
-                                }
+                            if let (Some(at), Some(item)) = (bar_at, carried) {
+                                emit(Msg::CarryOut(Some(CarryOut { module, item, at })));
                             } else if was_out {
                                 emit(Msg::CarryOut(None));
                             }
@@ -1559,13 +1566,10 @@ fn folder_grid() -> Element<Bar, Msg> {
                         };
                         if let Some(c) = drag {
                             if out {
-                                if heroui::widgets::popover_offset(f).is_some() {
-                                    emit(Msg::CarryDrop);
-                                } else if let Some(p) = c.item.pinned.clone().or(c.item.folder.clone()) {
-                                    // Where the bar is isn't known: out
-                                    // of the folder, next to it.
-                                    emit(Msg::TaskAction(module, TaskAction::MoveOut(p)));
-                                }
+                                // Onto the taskbar (it worked out where),
+                                // or nowhere: back in the folder.
+                                let _ = (c, module);
+                                emit(Msg::CarryDrop);
                             } else if let Some(a) = act {
                                 emit(Msg::TaskAction(usize::MAX, a));
                             }
