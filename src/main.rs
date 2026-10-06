@@ -386,8 +386,9 @@ impl App for Bar {
                 let mut tasks = Vec::new();
                 for i in due {
                     let secs = self.modules[i].interval.max(1.0);
-                    // A little early, so 1-second clocks don't skip.
-                    self.due[i] = now + Duration::from_secs_f64(secs - 0.05);
+                    // Half a beat early: heartbeats arrive a little early or
+                    // late, and a 1-second module must never skip one.
+                    self.due[i] = now + Duration::from_secs_f64(secs - 0.5);
                     tasks.push(self.update(Msg::Tick(i)));
                 }
                 tasks.push(self.update(Msg::CheckReload));
@@ -563,10 +564,19 @@ impl App for Bar {
     fn subscriptions(&self) -> Vec<Subscription<Msg>> {
         // The monitor whose workspaces to show, if one is configured.
         let output = self.modules.iter().find(|m| m.kind == Kind::Workspaces).and_then(|m| m.cfg.output.clone());
-        // One timer for everything (it survives config changes); modules
-        // refresh on it when due.
+        // One heartbeat for everything (it survives config changes);
+        // modules refresh on it when due. It beats just after each second
+        // of the wall clock turns, so a clock with seconds changes exactly
+        // when it should (a timer started at a random moment can't).
         let (desktop, audio, net) = self.workers;
-        std::iter::once(Subscription::every(Duration::from_secs(1), Msg::Heartbeat))
+        std::iter::once(Subscription::worker(|tx: heroui::Sender<Msg>| loop {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+            let to_next = 1_000_000_000 - now.subsec_nanos() as u64;
+            std::thread::sleep(Duration::from_nanos(to_next + 3_000_000));
+            if !tx.send(Msg::Heartbeat) {
+                break;
+            }
+        }))
             .chain(desktop.then(|| {
                 Subscription::worker(move |tx: heroui::Sender<Msg>| windows::run(output, move |u| tx.send(Msg::Windows(u))))
             }))
