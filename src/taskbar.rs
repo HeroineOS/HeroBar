@@ -628,6 +628,20 @@ struct View {
     press_id: u32,
     /// Picked up by a long press (or carried in from a folder).
     drag: Option<Carry>,
+    /// Where each button is drawn as it glides to its spot.
+    glide: crate::glide::Glides<Item>,
+}
+
+/// A button's identity across updates, for gliding: one per window in
+/// titled style, else per folder or app.
+fn glide_key(item: &Item) -> String {
+    if !item.label.is_empty() && item.windows.len() == 1 && item.folder.is_none() {
+        format!("w:{}", item.windows[0])
+    } else if let Some(p) = &item.folder {
+        format!("f:{p:?}")
+    } else {
+        format!("a:{}", item.app_id)
+    }
 }
 
 /// How long a press must last to pick a button up and move it.
@@ -725,6 +739,7 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
             pressed: None,
             press_id: 0,
             drag: None,
+            glide: Default::default(),
         }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
@@ -734,7 +749,7 @@ pub fn view(i: usize) -> Element<Bar, Msg> {
                 // Never fails in practice: the handler doesn't hold the
                 // state while FLTK could draw.
                 if let Ok(v) = v.try_borrow() {
-                    paint(&v, f.x(), f.y(), f.w(), f.h());
+                    paint(&v, &f.as_base_widget(), f.x(), f.y(), f.w(), f.h());
                 }
             });
         }
@@ -999,7 +1014,7 @@ fn paint_target(c: &Carry, target: &Item, (x, y, w, h): (i32, i32, i32, i32), r:
     }
 }
 
-fn paint(v: &View, x: i32, y: i32, w: i32, h: i32) {
+fn paint(v: &View, me: &heroui::fltk::widget::Widget, x: i32, y: i32, w: i32, h: i32) {
     let t = heroui::theme::current();
     crate::island(x, y, w, h);
     let bh = h - 8;
@@ -1007,11 +1022,28 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32) {
     draw::push_clip(x, y, w, h);
     draw::set_font(t.font(), t.font_size - 1);
     let r = t.radius.min(bh / 2).min(8);
+    // Each button glides to its spot (see glide.rs); new ones pop in.
+    v.glide.begin(me);
+    let mut seen: std::collections::HashMap<String, usize> = Default::default();
+    let mut key = |item: &Item| {
+        let k = glide_key(item);
+        let n = seen.entry(k.clone()).or_insert(0);
+        *n += 1;
+        if *n == 1 { k } else { format!("{k}#{n}") }
+    };
+    let mut draw_at = |idx: usize, item: &Item, (tx, tw): (i32, i32), target: Option<&Carry>| {
+        let ((gx, _, gw), pop) = v.glide.place(&key(item), (tx, 0, tw), item);
+        let rect = (x + gx, by, gw, bh);
+        if let Some(c) = target {
+            paint_target(c, item, rect, r);
+        }
+        heroui::fx::draw_scaled(rect, 0.6 + 0.4 * pop, pop.clamp(0.0, 1.0), || paint_item(v, idx, item, rect, false));
+    };
     match &v.drag {
         None => {
-            let mut bx = x;
+            let mut bx = 0;
             for (idx, (item, bw)) in v.items.iter().zip(v.layout(w)).enumerate() {
-                paint_item(v, idx, item, (bx, by, bw, bh), false);
+                draw_at(idx, item, (bx, bw), None);
                 bx += bw + GAP;
             }
         }
@@ -1019,16 +1051,24 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32) {
             // The others make room where it would land.
             for (idx, (bx, _, bw, _)) in v.placed(w, h, c) {
                 let item = &v.items[idx];
-                if c.over == Some(idx) {
-                    paint_target(c, item, (x + bx, by, bw, bh), r);
-                }
-                paint_item(v, idx, item, (x + bx, by, bw, bh), false);
+                draw_at(idx, item, (bx, bw), (c.over == Some(idx)).then_some(c));
             }
-            // The carried button follows the pointer, a bit raised.
-            let cw = v.carry_width(w, c);
-            let cx = (x + c.at.0 - cw / 2).clamp(x, x + w - cw);
-            paint_item(v, usize::MAX, &c.item, (cx, by - 2, cw, bh), true);
+            // The carried one isn't gone.
+            if let Some(f) = c.from.and_then(|f| v.items.get(f)) {
+                v.glide.keep(&key(f));
+            }
         }
+    }
+    // Closed apps shrink and fade where they were.
+    v.glide.end(|item, (gx, _, gw), a| {
+        let rect = (x + gx, by, gw, bh);
+        heroui::fx::draw_scaled(rect, 0.5 + 0.5 * a, a, || paint_item(v, usize::MAX, item, rect, false));
+    });
+    if let Some(c) = &v.drag {
+        // The carried button follows the pointer, a bit raised.
+        let cw = v.carry_width(w, c);
+        let cx = (x + c.at.0 - cw / 2).clamp(x, x + w - cw);
+        paint_item(v, usize::MAX, &c.item, (cx, by - 2, cw, bh), true);
     }
     draw::pop_clip();
 }

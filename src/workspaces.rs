@@ -33,10 +33,17 @@ struct View {
     font: i32,
     hover: crate::fade::HoverFade,
     pressed: Option<usize>,
-    /// Where the highlight is, as a fractional index: it slides from the
-    /// old workspace to the new one.
-    slide: heroui::anim::Tween,
+    /// The highlight's two ends, as fractional indexes: the leading end
+    /// springs to the new workspace and the trailing one follows a moment
+    /// later, so it stretches across and snaps back (a "worm").
+    head: heroui::anim::Tween,
+    tail: heroui::anim::Tween,
 }
+
+/// The highlight's leading end: quick, a hint of bounce.
+const HEAD: heroui::anim::Spring = heroui::anim::Spring { response: 0.22, damping: 0.78 };
+/// Its trailing end: slower, settled.
+const TAIL: heroui::anim::Spring = heroui::anim::Spring { response: 0.36, damping: 0.92 };
 
 impl View {
     /// Button widths: at least square, wider for long names.
@@ -61,7 +68,7 @@ impl View {
 
 pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Msg> {
     Element::new(move |ctx| {
-        let v = Rc::new(RefCell::new(View { list: vec![], font: 14, hover: Default::default(), pressed: None, slide: heroui::anim::Tween::new(-1.0) }));
+        let v = Rc::new(RefCell::new(View { list: vec![], font: 14, hover: Default::default(), pressed: None, head: heroui::anim::Tween::new(-1.0), tail: heroui::anim::Tween::new(-1.0) }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
         {
@@ -132,12 +139,19 @@ pub fn view(i: usize, font_size: Option<i32>, in_group: bool) -> Element<Bar, Ms
             let old = s.list.iter().position(|w| w.active);
             let new = list.iter().position(|w| w.active);
             match (old, new) {
-                (Some(_), Some(n)) if ids(&s.list) == ids(&list) && s.slide.get() >= 0.0 => {
-                    let mut w2 = w.clone();
-                    s.slide.animate_to(n as f64, std::time::Duration::from_millis(220), move || repaint(&mut w2));
+                (Some(_), Some(n)) if ids(&s.list) == ids(&list) && s.head.get() >= 0.0 => {
+                    let (mut w2, mut w3) = (w.clone(), w.clone());
+                    s.head.spring_to(n as f64, HEAD, move || repaint(&mut w2));
+                    s.tail.spring_to(n as f64, TAIL, move || repaint(&mut w3));
                 }
-                (_, Some(n)) => s.slide.set(n as f64),
-                (_, None) => s.slide.set(-1.0),
+                (_, Some(n)) => {
+                    s.head.set(n as f64);
+                    s.tail.set(n as f64);
+                }
+                (_, None) => {
+                    s.head.set(-1.0);
+                    s.tail.set(-1.0);
+                }
             }
             s.list = list;
             s.font = font_size.unwrap_or_else(|| heroui::theme::current().font_size);
@@ -178,19 +192,31 @@ fn paint(v: &View, x: i32, y: i32, w: i32, h: i32, in_group: bool) {
             draw::draw_rounded_rectf(xs[idx], by, widths[idx], bh, r);
         }
     }
-    let f = v.slide.get();
-    if f >= 0.0 && !v.list.is_empty() {
-        let i0 = (f.floor() as usize).min(v.list.len() - 1);
-        let i1 = (f.ceil() as usize).min(v.list.len() - 1);
-        let k = (f - f.floor()) as f32;
-        let lerp = |a: i32, b: i32| a + ((b - a) as f32 * k).round() as i32;
-        draw::set_draw_color(t.accent);
-        draw::draw_rounded_rectf(lerp(xs[i0], xs[i1]), by, lerp(widths[i0], widths[i1]), bh, r);
-    }
+    // A fractional index's left edge and width, between buttons.
+    let n = v.list.len();
+    let at = |f: f64| {
+        let f = f.clamp(0.0, (n.max(1) - 1) as f64);
+        let (i0, i1) = (f.floor() as usize, f.ceil() as usize);
+        let k = f - f.floor();
+        let lerp = |a: i32, b: i32| a as f64 + (b - a) as f64 * k;
+        (lerp(xs[i0], xs[i1]), lerp(widths[i0], widths[i1]))
+    };
+    let (head, tail) = (v.head.get(), v.tail.get());
+    let rad = r as f64;
+    // The highlight spans both ends (sub-pixel: it glides).
+    let span = (head >= 0.0 && n > 0).then(|| {
+        let ((hx, hw), (tx, tw)) = (at(head), at(tail));
+        let (l, r) = (hx.min(tx), (hx + hw).max(tx + tw));
+        heroui::fx::fill_rounded(l, by as f64, r - l, bh as f64, rad, t.accent, 1.0);
+        (l, r)
+    });
     for (idx, ws) in v.list.iter().enumerate() {
         let base = if ws.occupied { t.text } else { mix(t.text, t.background, 0.55) };
         // Text under the highlight takes its color, as it passes.
-        let cover = if f >= 0.0 { (1.0 - (idx as f64 - f).abs()).max(0.0) as f32 } else { 0.0 };
+        let cover = span.map_or(0.0, |(l, r)| {
+            let (a, b) = (xs[idx] as f64, (xs[idx] + widths[idx]) as f64);
+            ((r.min(b) - l.max(a)) / (b - a)).clamp(0.0, 1.0) as f32
+        });
         draw::set_draw_color(mix(base, t.accent_text, cover));
         draw::draw_text2(&ws.label, xs[idx], by, widths[idx], bh, Align::Center);
     }

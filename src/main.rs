@@ -8,6 +8,7 @@ mod config;
 mod edit;
 mod fade;
 mod fit;
+mod glide;
 mod modules;
 mod popups;
 mod reload;
@@ -420,7 +421,7 @@ impl App for Bar {
                 }
                 self.pending = Some(new);
                 return Task::perform(|| {
-                    std::thread::sleep(Duration::from_millis(200));
+                    std::thread::sleep(Duration::from_millis(330));
                     Msg::Rebuild
                 });
             }

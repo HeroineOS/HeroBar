@@ -7,7 +7,7 @@
 //! sections' edge space, expanding spacers) share what's left of a row
 //! equally, which is what centers a module between two of them.
 //!
-//! Width changes glide (~180 ms) once [`animate`] is on: a module that
+//! Width changes spring (~0.3 s) once [`animate`] is on: a module that
 //! appears grows from nothing, one that changes slides to its new size,
 //! and its neighbors move along. Widths are remembered by module name, so
 //! after the bar is rebuilt (a config change) modules continue from where
@@ -92,17 +92,21 @@ pub fn set_width(w: &mut Widget, width: i32) {
     });
     let mut w2 = w.clone();
     let t2 = tween.clone();
-    tween.animate_to(width as f64, std::time::Duration::from_millis(180), move || {
+    // A spring: a new width mid-move carries on from the current speed.
+    tween.spring_to(width as f64, WIDTH_SPRING, move || {
         if w2.was_deleted() {
             return;
         }
-        let v = t2.get().round() as i32;
+        let v = t2.get().round().max(0.0) as i32;
         apply(&mut w2, v);
-        if v == width {
+        if t2.velocity() == 0.0 {
             TWEENS.with(|t| t.borrow_mut().remove(&key(&w2)));
         }
     });
 }
+
+/// How widths move: quick, settling with a barely visible overshoot.
+pub const WIDTH_SPRING: heroui::anim::Spring = heroui::anim::Spring { response: 0.3, damping: 0.85 };
 
 fn apply(w: &mut Widget, width: i32) {
     WIDTHS.with(|m| m.borrow_mut().insert(key(w), width));
