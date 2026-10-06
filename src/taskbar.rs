@@ -629,7 +629,7 @@ struct View {
     /// Picked up by a long press (or carried in from a folder).
     drag: Option<Carry>,
     /// Where each button is drawn as it glides to its spot.
-    glide: crate::glide::Glides<Item>,
+    glide: heroui::glide::Glides<Item>,
 }
 
 /// A button's identity across updates, for gliding: one per window in
@@ -1237,7 +1237,7 @@ struct FView {
     /// Scrolled by (glides, flicks).
     scroll: heroui::anim::Scroller,
     /// Where each button is drawn as it glides to its spot.
-    glide: crate::glide::Glides<Item>,
+    glide: heroui::glide::Glides<Item>,
 }
 
 impl FView {

@@ -8,7 +8,6 @@ mod config;
 mod edit;
 mod fade;
 mod fit;
-mod glide;
 mod modules;
 mod popups;
 mod reload;
