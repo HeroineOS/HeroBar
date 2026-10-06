@@ -506,14 +506,13 @@ pub fn run_exec(command: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Starts `command` with `sh -c` and returns at once; the shell
-/// backgrounds it, so it's adopted by init and never becomes our zombie.
+/// Starts `command` with `sh -c` on its own (HeroUI's launch: its own
+/// session, not our child), so restarting or Ctrl-C-ing the bar never
+/// takes apps started from it down too.
 pub fn launch(command: &str) {
-    let _ = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!("{command} &"))
-        .stdin(std::process::Stdio::null())
-        .status();
+    if let Err(e) = heroui::process::launch(command) {
+        eprintln!("herobar: can't start {command}: {e}");
+    }
 }
 
 fn cpu_jiffies() -> (u64, u64) {
