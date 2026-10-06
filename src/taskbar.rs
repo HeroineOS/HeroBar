@@ -1234,7 +1234,10 @@ struct FView {
     drag: Option<Carry>,
     /// The carried button is outside the popup (over the bar).
     out: bool,
-    scroll: i32,
+    /// Scrolled by (glides, flicks).
+    scroll: heroui::anim::Scroller,
+    /// Where each button is drawn as it glides to its spot.
+    glide: crate::glide::Glides<Item>,
 }
 
 impl FView {
@@ -1277,7 +1280,7 @@ impl FView {
         let used = cols.min(self.items.len().max(1)) as i32 * cw;
         let x0 = if self.style == FolderStyle::List { 0 } else { (w - used) / 2 };
         let (c, r) = ((n % cols) as i32, (n / cols) as i32);
-        (x0 + c * cw, r * (ch + self.row_gap()) - self.scroll, cw, ch)
+        (x0 + c * cw, r * (ch + self.row_gap()) - self.scroll.pos(), cw, ch)
     }
 
     /// Where the buttons are (index, rectangle): while one is carried, the
@@ -1309,8 +1312,8 @@ impl FView {
         (rows * (self.cell(w).1 + self.row_gap()) - self.row_gap()).max(0)
     }
 
-    fn scroll_by(&mut self, w: i32, h: i32, dy: i32) {
-        self.scroll = (self.scroll + dy).clamp(0, (self.content_h(w) - self.view_h(h)).max(0));
+    fn max_scroll(&self, w: i32, h: i32) -> f64 {
+        (self.content_h(w) - self.view_h(h)).max(0) as f64
     }
 
     /// Aims the carried button; true if a merge timer should start.
@@ -1394,18 +1397,36 @@ fn paint_entry(v: &FView, idx: usize, it: &Item, (x, y, w, h): Rect, lifted: boo
     }
 }
 
-fn paint_folder(v: &FView, x: i32, y: i32, w: i32, h: i32) {
+fn paint_folder(v: &FView, me: &heroui::fltk::widget::Widget, x: i32, y: i32, w: i32, h: i32) {
     let t = heroui::theme::current();
     let vh = v.view_h(h);
     draw::push_clip(x, y, w, vh);
     let r = t.radius.min(10);
+    // Buttons glide to their spots (in content coordinates, so scrolling
+    // doesn't animate them).
+    let sc = v.scroll.pos();
+    v.glide.begin(me);
+    let mut seen: std::collections::HashMap<String, usize> = Default::default();
     for (k, (bx, by, bw, bh)) in v.placed(w) {
-        let rect = (x + bx, y + by, bw, bh);
+        let key = glide_key(&v.items[k]);
+        let n = seen.entry(key.clone()).or_insert(0);
+        *n += 1;
+        let key = if *n == 1 { key } else { format!("{key}#{n}") };
+        let ((gx, gy, gw), pop) = v.glide.place(&key, (bx, by + sc, bw), &v.items[k]);
+        let rect = (x + gx, y + gy - sc, gw, bh);
         if let Some(c) = v.drag.as_ref().filter(|c| c.over == Some(k) && !v.out) {
             paint_target(c, &v.items[k], rect, r);
         }
-        paint_entry(v, k, &v.items[k], rect, false);
+        heroui::fx::draw_scaled(rect, 0.6 + 0.4 * pop, pop.clamp(0.0, 1.0), || paint_entry(v, k, &v.items[k], rect, false));
     }
+    if let Some(f) = v.drag.as_ref().and_then(|c| c.from).and_then(|f| v.items.get(f)) {
+        v.glide.keep(&glide_key(f));
+    }
+    let row_h = v.cell(w).1;
+    v.glide.end(|item, (gx, gy, gw), a| {
+        let rect = (x + gx, y + gy - sc, gw, row_h);
+        heroui::fx::draw_scaled(rect, 0.5 + 0.5 * a, a, || paint_entry(v, usize::MAX, item, rect, false));
+    });
     // The carried button follows the pointer, while it's in here.
     if let Some(c) = v.drag.as_ref().filter(|_| !v.out) {
         let (cw, ch) = v.cell(w);
@@ -1464,7 +1485,8 @@ fn folder_grid() -> Element<Bar, Msg> {
             scrolling: None,
             drag: None,
             out: false,
-            scroll: 0,
+            scroll: Default::default(),
+            glide: Default::default(),
         }));
         let mut f = Frame::default();
         f.set_frame(FrameType::NoBox);
@@ -1472,7 +1494,7 @@ fn folder_grid() -> Element<Bar, Msg> {
             let v = v.clone();
             f.draw(move |f| {
                 if let Ok(v) = v.try_borrow() {
-                    paint_folder(&v, f.x(), f.y(), f.w(), f.h());
+                    paint_folder(&v, &f.as_base_widget(), f.x(), f.y(), f.w(), f.h());
                 }
             });
         }
@@ -1500,8 +1522,9 @@ fn folder_grid() -> Element<Bar, Msg> {
                             app::MouseWheel::Up => -40,
                             _ => 0,
                         };
-                        v.borrow_mut().scroll_by(f.w(), f.h(), dy);
-                        repaint(&mut w);
+                        let s = v.borrow();
+                        let mut w2 = w.clone();
+                        s.scroll.wheel(dy as f64, s.max_scroll(f.w(), f.h()), move || repaint(&mut w2));
                         true
                     }
                     Event::Push => {
@@ -1516,6 +1539,7 @@ fn folder_grid() -> Element<Bar, Msg> {
                             s.pressed = hit.map(|k| (k, button, p));
                             s.down = Some(p);
                             s.scrolling = None;
+                            s.scroll.press();
                             let placed = s.placed(f.w());
                             let menu_args = (button == 3)
                                 .then(|| {
@@ -1576,7 +1600,8 @@ fn folder_grid() -> Element<Bar, Msg> {
                             }
                             repaint(&mut w);
                         } else if let Some(y0) = s.scrolling {
-                            s.scroll_by(f.w(), f.h(), y0 - p.1);
+                            let max = s.max_scroll(f.w(), f.h());
+                            s.scroll.drag_to((s.scroll.pos() + y0 - p.1) as f64, max);
                             s.scrolling = Some(p.1);
                             drop(s);
                             repaint(&mut w);
@@ -1598,7 +1623,11 @@ fn folder_grid() -> Element<Bar, Msg> {
                             let out = std::mem::take(&mut s.out);
                             let pressed = s.pressed.take();
                             s.down = None;
-                            s.scrolling = None;
+                            if s.scrolling.take().is_some() {
+                                // A flick keeps it going.
+                                let mut w2 = w.clone();
+                                s.scroll.release(s.max_scroll(f.w(), f.h()), move || repaint(&mut w2));
+                            }
                             s.press_id = s.press_id.wrapping_add(1);
                             let act = drag.as_ref().filter(|_| !out).and_then(|c| carry_action(&s.items, c, &s.path));
                             let click = pressed.and_then(|(k, b, _)| (b == 1 && s.at(f.w(), p) == Some(k)).then(|| s.items.get(k).cloned()).flatten());
@@ -1626,6 +1655,10 @@ fn folder_grid() -> Element<Bar, Msg> {
         }
         let mut w = f.as_base_widget();
         ctx.bind(move |bar: &Bar| {
+            // Closed: keep showing what it held while it pops out.
+            if bar.folder.is_none() {
+                return;
+            }
             let items = open_items(bar);
             let style = folder_style(bar);
             let (path, module) = bar.folder.as_ref().map_or((vec![], 0), |f| (f.path.clone(), f.module));
@@ -1634,7 +1667,8 @@ fn folder_grid() -> Element<Bar, Msg> {
                 return;
             }
             if s.path != path {
-                s.scroll = 0;
+                s.scroll.set(0.0);
+                s.glide.reset();
             }
             if let Some(cfg) = bar.modules.get(module).and_then(|m| m.taskbar.as_ref()) {
                 s.folders = crate::edit::folders(&cfg.raw);
@@ -1654,10 +1688,18 @@ fn folder_grid() -> Element<Bar, Msg> {
 }
 
 pub fn folder_view() -> Element<Bar, Msg> {
+    // The name stays while the popup pops out after closing.
+    let last = Rc::new(RefCell::new(String::new()));
+    let title = move |b: &Bar| {
+        if b.folder.is_some() {
+            *last.borrow_mut() = folder_name(b);
+        }
+        last.borrow().clone()
+    };
     column(vec![
         row(vec![
             button("<", Msg::FolderBack).fixed(40).visible(|b: &Bar| b.folder.as_ref().is_some_and(|f| f.path.len() > 1)),
-            canvas(folder_name, |name: &String, x, y, w, h, t: &Theme| {
+            canvas(title, |name: &String, x, y, w, h, t: &Theme| {
                 draw::set_font(t.bold_font(), t.font_size + 1);
                 draw::set_draw_color(t.text);
                 draw::draw_text2(name, x + 4, y, w - 4, h, Align::Left | Align::Inside);

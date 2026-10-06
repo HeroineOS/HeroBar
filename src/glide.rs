@@ -52,6 +52,14 @@ impl<T: Clone + 'static> Default for Glides<T> {
 }
 
 impl<T: Clone + 'static> Glides<T> {
+    /// Forgets everything (other content now): the next layout is placed
+    /// as is.
+    pub fn reset(&self) {
+        self.slots.borrow_mut().clear();
+        self.ghosts.borrow_mut().clear();
+        self.started.set(false);
+    }
+
     /// Starts a frame (before the `place` calls) for widget `w`.
     pub fn begin(&self, w: &Widget) {
         if self.widget.borrow().is_none() {

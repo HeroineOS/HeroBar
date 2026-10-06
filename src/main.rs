@@ -867,6 +867,9 @@ fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, reserve: &str, hover
     if !in_group {
         island(w.x(), w.y(), w.w(), w.h());
     }
+    // Pressing squeezes the highlight in a little (HeroUI's press_amount).
+    let press = heroui::hover::press_amount(w);
+    let hovered = hovered.max(press);
     if hovered > 0.0 {
         // Fades in and out (HeroUI's hover_amount): blend from what's under.
         let under = if ISLANDS.with(Cell::get).is_some() {
@@ -874,11 +877,12 @@ fn paint_module_(w: &dyn WidgetExt, icon: &str, text: &str, reserve: &str, hover
         } else {
             t.background
         };
-        draw::set_draw_color(heroui::widgets::mix(under, t.surface_alt, hovered));
         let m = margin();
         let h = w.h() - 2 * m;
         let r = if ISLANDS.with(Cell::get).is_some() { island_radius(h) } else { t.radius.min(h / 2) };
-        draw::draw_rounded_rectf(w.x(), w.y() + m, w.w(), h, r);
+        let i = 1.5 * press as f64;
+        let color = heroui::widgets::mix(under, t.surface_alt, hovered);
+        heroui::fx::fill_rounded(w.x() as f64 + i, (w.y() + m) as f64 + i, w.w() as f64 - 2.0 * i, h as f64 - 2.0 * i, r as f64 - i, color, 1.0);
     }
     let mut x = w.x() + sz.padding;
     if !icon.is_empty() {
@@ -1014,7 +1018,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
         // hover); the others are plain frames.
         let widget = if click == Click::Popup {
             let mut b = press_button(move |b| {
-                let hovered = if b.value() { 1.0 } else { hover_amount(b) };
+                let hovered = hover_amount(b);
                 paint(b, hovered)
             });
             let emit = ctx.emitter();
@@ -1026,7 +1030,7 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
             b.as_base_widget()
         } else if click == Click::Command || click == Click::Launcher {
             let mut b = custom_button(move |b| {
-                let hovered = if b.value() { 1.0 } else { hover_amount(b) };
+                let hovered = hover_amount(b);
                 paint(b, hovered)
             });
             let emit = ctx.emitter();
@@ -1147,7 +1151,7 @@ fn drawer_toggle(g: usize, icon: String) -> Element<Bar, Msg> {
         let mut b = custom_button({
             let open = open.clone();
             move |b| {
-                let hovered = if b.value() || open.get() { 1.0 } else { hover_amount(b) };
+                let hovered = if open.get() { 1.0 } else { hover_amount(b) };
                 let sz = ModSizes { padding: sizes.padding, icon: sizes.icon, font: None };
                 paint_module(b, &icon, "", "", hovered, true, sz);
             }
