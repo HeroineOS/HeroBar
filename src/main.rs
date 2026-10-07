@@ -1194,7 +1194,8 @@ fn usage() -> &'static str {
   --config FILE           Use FILE instead of ~/.config/hero/bar.toml
   --check                 Validate the config and exit (status 1 if invalid)
   --print-default-config  Print the commented default config
-  --version               Print the version"
+  --version               Print the version
+  --help                  Print this"
 }
 
 fn main() {
@@ -1220,7 +1221,7 @@ fn main() {
                 return;
             }
             "--help" | "-h" => {
-                println!("{}", usage());
+                println!("herobar {} - the HeroineOS status bar\n\n{}", env!("CARGO_PKG_VERSION"), usage());
                 return;
             }
             other => {
