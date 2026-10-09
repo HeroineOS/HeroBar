@@ -25,12 +25,12 @@ island-style = "rounded"   # "sharp", "rounded" or "pill"
 
 # Modules, from the screen edge inwards for left/right. Each name refers to a
 # [modules.<name>] section below. Kinds: clock, cpu, memory, battery, network,
-# volume, bluetooth, launcher, taskbar, workspaces, spacer, group/<name>,
-# custom/<name>.
+# volume, bluetooth, notifications, launcher, taskbar, workspaces, spacer,
+# group/<name>, custom/<name>.
 # For more than one of a kind, add "/<anything>": "cpu/big", "spacer/2"...
 modules-left = ["launcher", "workspaces", "taskbar"]
 modules-center = ["clock"]
-modules-right = ["volume", "network", "group/system", "battery"]
+modules-right = ["notifications", "volume", "network", "group/system", "battery"]
 
 # ---------------------------------------------------------
 
@@ -87,6 +87,14 @@ interval = 5
 
 # {capacity} (percent), {status}: Charging, Discharging, Full...,
 # {time}: until empty or full. The icon shows the level, or charging.
+# HeroNotify's notifications: a bell (crossed out during do-not-disturb) and
+# how many are new. A click: the history (click one to open its app; x takes
+# it out), "Clear all", and the do-not-disturb switch. Schedules and apps
+# let through are in ~/.config/hero/notifications.toml ("Settings..." runs
+# on-click, Appearance by default).
+[modules.notifications]
+format = "{unread}"
+
 # Hover: percent, status and time left. Hidden without a battery.
 # A click shows the time left and a screen brightness slider (needs
 # brightnessctl); popup = false turns it off, and on-click is then the

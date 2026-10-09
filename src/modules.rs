@@ -21,6 +21,8 @@ pub enum Kind {
     Group,
     Custom,
     Launcher,
+    /// HeroNotify's history and do-not-disturb (notes.rs).
+    Notifications,
 }
 
 impl Kind {
@@ -46,6 +48,7 @@ impl Kind {
             "bluetooth" => Kind::Bluetooth,
             "spacer" => Kind::Spacer,
             "launcher" => Kind::Launcher,
+            "notifications" => Kind::Notifications,
             "group" if rest.is_some() => Kind::Group,
             "custom" if rest.is_some() => Kind::Custom,
             _ => return None,
@@ -54,7 +57,7 @@ impl Kind {
 
     fn default_interval(self) -> f64 {
         match self {
-            Kind::Clock => 1.0,
+            Kind::Clock | Kind::Notifications => 1.0,
             Kind::Cpu => 2.0,
             Kind::Memory | Kind::Network | Kind::Volume => 5.0,
             Kind::Bluetooth => 10.0,
@@ -72,6 +75,7 @@ impl Kind {
             Kind::Network => "{name}",
             Kind::Bluetooth => "{device}",
             Kind::Volume => "{volume}%",
+            Kind::Notifications => "{unread}",
             _ => "",
         }
     }
@@ -88,6 +92,7 @@ impl Kind {
             Kind::Bluetooth => "bluetooth",
             Kind::Group => "apps",
             Kind::Launcher => "cat",
+            Kind::Notifications => "bell",
             _ => "",
         }
     }
@@ -271,6 +276,21 @@ impl Module {
             fill(&self.format, &[("device", connected[0].to_owned()), ("count", connected.len().to_string())])
         };
         self.reserve = self.text.clone();
+    }
+
+    /// Shows the notifications: a bell (crossed out during do-not-disturb)
+    /// and how many are new.
+    pub fn set_notes(&mut self, n: &crate::notes::Notes) {
+        self.set_icon(if n.dnd { "bell-off" } else { "bell" });
+        self.text = if n.unread > 0 { fill(&self.format, &[("unread", slot(n.unread.to_string()))]) } else { String::new() };
+        self.reserve = self.text.clone();
+        self.tooltip = match (n.unread, n.dnd) {
+            (_, _) if !n.installed => "Notifications: HeroNotify isn't installed".into(),
+            (0, false) => "No new notifications".into(),
+            (0, true) => "Do not disturb is on".into(),
+            (1, d) => format!("1 new notification{}", if d { " (do not disturb)" } else { "" }),
+            (k, d) => format!("{k} new notifications{}", if d { " (do not disturb)" } else { "" }),
+        };
     }
 
     /// Sets the dynamic icon, unless the config chose one.

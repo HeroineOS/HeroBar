@@ -43,6 +43,7 @@ itself; a config with errors is reported and ignored until fixed). Appearance ed
 | `battery` | battery level (hidden without a battery); click: time left and screen brightness (brightnessctl) | `{capacity}` `{status}` |
 | `network` | connection of the default route; `units = "short"` for compact speeds (1.7K) | `{name}` `{essid}` `{ifname}` `{state}` `{signal}` `{down}` `{up}` `{down-total}` `{up-total}` |
 | `volume` | default output volume, via wpctl or pactl (hidden without audio) | `{volume}` |
+| `notifications` | a bell with how many notifications are new (crossed out during do-not-disturb); click: the history (click one to open its app), clear, and the do-not-disturb switch. Needs [HeroNotify](https://github.com/HeroineOS/HeroNotify) | `{unread}` |
 | `launcher` | opens HeroLauncher: `mode = "menu"` under the button, `"center"` in the middle; `icon`, `text = "Start"` | |
 | `taskbar` | pinned apps and open windows | (see below) |
 | `workspaces` | the monitor's workspaces; click to switch, wheel to step | |

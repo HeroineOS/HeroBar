@@ -9,6 +9,7 @@ mod edit;
 mod fade;
 mod fit;
 mod modules;
+mod notes;
 mod popups;
 mod reload;
 mod system;
@@ -307,6 +308,7 @@ impl Bar {
                     Kind::Network => (popups::net_view(i), popups::net_size),
                     Kind::Clock => (popups::calendar_view(i), popups::calendar_size),
                     Kind::Battery => (popups::battery_view(i), popups::battery_size),
+                    Kind::Notifications => (popups::notes_view(i), popups::notes_size),
                     _ => (popups::bt_view(i), popups::bt_size),
                 };
                 popover(
@@ -332,6 +334,7 @@ impl App for Bar {
             Msg::Tick(i) if self.modules[i].kind == Kind::Bluetooth => {
                 return Task::perform(|| Msg::Sys(popups::SysMsg::Bt(system::bt())));
             }
+            Msg::Tick(i) if self.modules[i].kind == Kind::Notifications => return self.update_sys(popups::SysMsg::NotesCheck),
             Msg::Tick(i) => {
                 let m = &mut self.modules[i];
                 if let Some(cmd) = m.exec.clone() {
@@ -1075,8 +1078,9 @@ fn module_view(i: usize, click: Click, in_group: bool) -> Element<Bar, Msg> {
             sizes.set(ModSizes::of(m));
             *shown.borrow_mut() = (m.icon.clone(), m.text.clone(), m.reserve.clone());
 
-            // Custom, Bluetooth and network modules may be just an icon.
-            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network | Kind::Launcher);
+            // Custom, Bluetooth, network and notifications modules may be
+            // just an icon.
+            let icon_only = matches!(m.kind, Kind::Custom | Kind::Bluetooth | Kind::Network | Kind::Launcher | Kind::Notifications);
             // Changing numbers (CPU %, network speeds) would make the
             // module and its neighbors jitter: it's sized for its numbers
             // at their widest.

@@ -1,5 +1,5 @@
-//! The volume, network, bluetooth, battery and calendar popups: state,
-//! messages and views.
+//! The volume, network, bluetooth, battery, calendar and notifications
+//! popups: state, messages and views.
 //!
 //! A click on one of those modules opens its popup right under it (above
 //! it on a bottom bar), as a Wayland popup of the bar (HeroUI `popover`).
@@ -57,6 +57,8 @@ pub struct Sys {
     bright_busy: bool,
     /// A brightness waiting for the previous change to finish.
     bright_pending: Option<u32>,
+    /// HeroNotify's history and do-not-disturb.
+    pub notes: crate::notes::Notes,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +96,16 @@ pub enum SysMsg {
     Brightness(Option<u32>),
     SetBrightness(f64),
     BrightnessDone(Result<(), String>),
+    /// The heartbeat: has the history or do-not-disturb changed?
+    NotesCheck,
+    /// Do-not-disturb (on now, on by hand); None without HeroNotify.
+    NotesDnd(Option<(bool, bool)>),
+    SetDnd(bool),
+    /// `heronotify` with these arguments.
+    NotesRun(Vec<String>),
+    NotesDone(Result<(), String>),
+    /// Open the app of history entry `k` (and take it out of the list).
+    NoteOpen(usize),
 }
 
 fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
@@ -101,7 +113,7 @@ fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
 }
 
 pub fn has_popup(kind: Kind) -> bool {
-    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock | Kind::Battery)
+    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock | Kind::Battery | Kind::Notifications)
 }
 
 /// The command behind "Advanced...": the module's on-click, else the
@@ -113,6 +125,7 @@ pub fn advanced(bar: &Bar, i: usize) -> String {
             Kind::Volume => "pavucontrol",
             Kind::Network => "nm-connection-editor",
             Kind::Battery => "xfce4-power-manager-settings",
+            Kind::Notifications => "heroappearance",
             _ => "blueman-manager",
         }
         .into()
@@ -150,6 +163,9 @@ impl Bar {
                         task(|| SysMsg::Brightness(system::brightness()))
                     }
                     Kind::Volume => task(|| SysMsg::Audio(system::audio())),
+                    // Opening the list sees what's new.
+                    Kind::Notifications if s.notes.unread > 0 => self.update_sys(SysMsg::NotesRun(vec!["seen".into()])),
+                    Kind::Notifications => Task::none(),
                     Kind::Network => {
                         s.scanning = true;
                         Task::batch([task(|| SysMsg::Net(system::net(false), false)), task(|| SysMsg::Net(system::net(true), true))])
@@ -369,6 +385,49 @@ impl Bar {
                 }
             }
             SysMsg::CalShift(n) => s.cal_offset = if n == 0 { 0 } else { s.cal_offset + n },
+            SysMsg::NotesCheck => {
+                if s.notes.reload() {
+                    self.show_notes();
+                }
+                if self.sys.notes.dnd_due() {
+                    return task(|| SysMsg::NotesDnd(crate::notes::dnd()));
+                }
+            }
+            SysMsg::NotesDnd(d) => {
+                let (on, manual) = d.unwrap_or_default();
+                s.notes.dnd = on;
+                s.notes.dnd_manual = manual;
+                self.show_notes();
+            }
+            SysMsg::SetDnd(on) => {
+                s.notes.dnd_manual = on;
+                s.notes.dnd = on || s.notes.dnd;
+                return self.update_sys(SysMsg::NotesRun(vec!["dnd".into(), if on { "on" } else { "off" }.into()]));
+            }
+            SysMsg::NotesRun(args) => {
+                return task(move || SysMsg::NotesDone(crate::notes::run(&args.iter().map(String::as_str).collect::<Vec<_>>())));
+            }
+            SysMsg::NotesDone(r) => {
+                s.status = r.err().unwrap_or_default();
+                s.notes.forget_dnd();
+                return self.update_sys(SysMsg::NotesCheck);
+            }
+            SysMsg::NoteOpen(k) => {
+                let Some(n) = s.notes.list.get(k).cloned() else { return Task::none() };
+                s.open = None;
+                // Its app, by desktop id, else by name.
+                let app = [n.entry.as_str(), &n.app.to_lowercase()].into_iter().filter(|id| !id.is_empty()).find_map(crate::apps::by_id);
+                let id = n.id.to_string();
+                return Task::batch([
+                    self.update_sys(SysMsg::NotesRun(vec!["clear".into(), id])),
+                    Task::perform(move || {
+                        if let Some(a) = app {
+                            crate::modules::launch(&a.exec);
+                        }
+                        Msg::Launched
+                    }),
+                ]);
+            }
             SysMsg::BtDevice(i) => {
                 let Some(d) = s.bt.as_ref().and_then(|b| b.devices.get(i)).cloned() else { return Task::none() };
                 let cmd = if d.connected {
@@ -404,6 +463,13 @@ impl Bar {
         for m in self.modules.iter_mut().filter(|m| m.kind == Kind::Network) {
             m.essid = ssid.clone();
             m.refresh();
+        }
+    }
+
+    fn show_notes(&mut self) {
+        let notes = &self.sys.notes;
+        for m in self.modules.iter_mut().filter(|m| m.kind == Kind::Notifications) {
+            m.set_notes(notes);
         }
     }
 
@@ -909,4 +975,154 @@ fn paint_month(m: &Month, x: i32, y: i32, w: i32, _h: i32, t: &Theme) {
         });
         draw::draw_text2(&label.to_string(), cx, cy, cw, CELL, Align::Center);
     }
+}
+
+// --- Notifications --------------------------------------------------------
+
+const NOTE_ROW: i32 = 54;
+/// Most history rows shown before the list scrolls.
+const NOTE_ROWS: usize = 6;
+
+/// One history entry: its picture, title, time, app and text; a click
+/// opens its app.
+fn note_row(k: usize) -> Element<Bar, Msg> {
+    let entry = move |b: &Bar| b.sys.notes.list.get(k).cloned().unwrap_or_default();
+    let open = Element::new(move |ctx| {
+        let cur = std::rc::Rc::new(std::cell::RefCell::new((crate::notes::Note::default(), String::new())));
+        let mut b = custom_button({
+            let cur = cur.clone();
+            move |b| {
+                let t = heroui::theme::current();
+                let (n, ago) = &*cur.borrow();
+                let a = if b.value() { 1.0 } else { hover_amount(b) };
+                if a > 0.0 {
+                    draw::set_draw_color(heroui::widgets::mix(t.background, t.surface_alt, a));
+                    draw::draw_rounded_rectf(b.x(), b.y(), b.w(), b.h(), t.radius.min(10));
+                }
+                let (x, y, w, h) = (b.x() + 8, b.y(), b.w() - 12, b.h());
+                if n.icon.is_empty() || !heroui::icons::draw(&n.icon, x, y + (h - 28) / 2, 28, t.text) {
+                    heroui::icons::draw("bell", x + 4, y + (h - 20) / 2, 20, t.text_dim);
+                }
+                let tx = x + 40;
+                draw::set_font(t.font(), t.font_size - 2);
+                let tw = draw::width(ago) as i32;
+                draw::set_draw_color(t.text_dim);
+                draw::draw_text2(ago, x + w - tw, y + 6, tw, 20, Align::Right | Align::Inside);
+                let title = if n.summary.is_empty() { &n.app } else { &n.summary };
+                draw::set_font(t.bold_font(), t.font_size - 1);
+                draw::set_draw_color(if n.urgency >= 2 { t.accent } else { t.text });
+                draw::push_clip(tx, y, (x + w - tw - 8 - tx).max(0), h);
+                draw::draw_text2(title, tx, y + 6, (x + w - tw - 8 - tx).max(0), 20, Align::Left | Align::Inside);
+                draw::pop_clip();
+                let line = match (n.app.is_empty() || n.summary.is_empty(), n.body.is_empty()) {
+                    (true, _) => n.body.replace('\n', " "),
+                    (false, true) => n.app.clone(),
+                    (false, false) => format!("{}: {}", n.app, n.body.replace('\n', " ")),
+                };
+                draw::set_font(t.font(), t.font_size - 2);
+                draw::set_draw_color(t.text_dim);
+                draw::push_clip(tx, y, (x + w - tx).max(0), h);
+                draw::draw_text2(&line, tx, y + 27, (x + w - tx).max(0), 20, Align::Left | Align::Inside);
+                draw::pop_clip();
+            }
+        });
+        let emit = ctx.emitter();
+        b.set_callback(move |_| emit(Msg::Sys(SysMsg::NoteOpen(k))));
+        let mut w = b.clone();
+        ctx.bind(move |bar: &Bar| {
+            let n = entry(bar);
+            let now = (n.clone(), crate::notes::ago(n.time));
+            if *cur.borrow() != now {
+                *cur.borrow_mut() = now;
+                heroui::widgets::repaint(&mut w);
+            }
+        });
+        b.as_base_widget()
+    });
+    let close = Element::new(move |ctx| {
+        let id = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let mut b = custom_button(|b| {
+            let t = heroui::theme::current();
+            let a = if b.value() { 1.0 } else { hover_amount(b) };
+            if a > 0.0 {
+                draw::set_draw_color(heroui::widgets::mix(t.background, t.surface_alt, a));
+                draw::draw_rounded_rectf(b.x() + 2, b.y() + (b.h() - 24) / 2, 24, 24, 12);
+            }
+            draw::set_draw_color(t.text_dim);
+            draw::set_line_style(draw::LineStyle::Solid, 2);
+            let (mx, my, r) = (b.x() + 14, b.y() + b.h() / 2, 4);
+            draw::draw_line(mx - r, my - r, mx + r, my + r);
+            draw::draw_line(mx - r, my + r, mx + r, my - r);
+            draw::set_line_style(draw::LineStyle::Solid, 0);
+        });
+        b.set_tooltip("Remove");
+        let emit = ctx.emitter();
+        {
+            let id = id.clone();
+            b.set_callback(move |_| emit(Msg::Sys(SysMsg::NotesRun(vec!["clear".into(), id.get().to_string()]))));
+        }
+        ctx.bind(move |bar: &Bar| id.set(bar.sys.notes.list.get(k).map_or(0, |n| n.id)));
+        b.as_base_widget()
+    })
+    .fixed(28);
+    row(vec![open, close]).spacing(0).fixed(NOTE_ROW)
+}
+
+fn note_rows_height(n: usize) -> i32 {
+    let n = n.min(NOTE_ROWS) as i32;
+    let gap = heroui::theme::current().spacing;
+    (n * (NOTE_ROW + gap) - gap).max(0)
+}
+
+/// The history, do-not-disturb, and clearing.
+pub fn notes_view(i: usize) -> Element<Bar, Msg> {
+    column(vec![
+        row(vec![
+            heading("Notifications"),
+            button("Clear all", Msg::Sys(SysMsg::NotesRun(vec!["clear".into()]))).fixed(96).enabled(|b: &Bar| !b.sys.notes.list.is_empty()),
+        ])
+        .fixed(32),
+        row(vec![
+            icon(|b: &Bar| if b.sys.notes.dnd { "bell-off".to_string() } else { "bell".to_string() }, 20).fixed(30),
+            text(|b: &Bar| {
+                match (b.sys.notes.dnd_manual, b.sys.notes.dnd) {
+                    (false, true) => "Do not disturb (scheduled now)".to_string(),
+                    _ => "Do not disturb".to_string(),
+                }
+            }),
+            toggle("", |b: &Bar| b.sys.notes.dnd_manual, |on| Msg::Sys(SysMsg::SetDnd(on))).fixed(56),
+        ])
+        .fixed(34)
+        .visible(|b: &Bar| b.sys.notes.installed),
+        scroll(vec![list(|b: &Bar| b.sys.notes.list.len(), note_row)]).fixed_with(|b: &Bar| note_rows_height(b.sys.notes.list.len())),
+        note(|b: &Bar| {
+            let n = &b.sys.notes;
+            if !n.installed {
+                "Needs HeroNotify (the heronotify package).".into()
+            } else if !b.sys.status.is_empty() {
+                b.sys.status.clone()
+            } else if n.list.is_empty() {
+                "No notifications".into()
+            } else {
+                String::new()
+            }
+        })
+        .fixed(22),
+        advanced_button(i, "Settings..."),
+    ])
+    .padding(12)
+    .spacing(6)
+}
+
+pub fn notes_size(b: &Bar) -> (i32, i32) {
+    let n = &b.sys.notes;
+    let mut h = 12 + 32 + 6;
+    if n.installed {
+        h += 34 + 6;
+    }
+    if !n.list.is_empty() {
+        h += note_rows_height(n.list.len()) + 6;
+    }
+    h += 22 + 6 + 34 + 12;
+    (WIDTH + 30, h)
 }
