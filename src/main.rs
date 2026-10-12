@@ -9,6 +9,7 @@ mod edit;
 mod fade;
 mod fit;
 mod modules;
+mod memtop;
 mod notes;
 mod popups;
 mod reload;
@@ -309,6 +310,7 @@ impl Bar {
                     Kind::Clock => (popups::calendar_view(i), popups::calendar_size),
                     Kind::Battery => (popups::battery_view(i), popups::battery_size),
                     Kind::Notifications => (popups::notes_view(i), popups::notes_size),
+                    Kind::Memory => (popups::mem_view(), popups::mem_size),
                     _ => (popups::bt_view(i), popups::bt_size),
                 };
                 popover(
@@ -334,6 +336,7 @@ impl App for Bar {
             Msg::Tick(i) if self.modules[i].kind == Kind::Bluetooth => {
                 return Task::perform(|| Msg::Sys(popups::SysMsg::Bt(system::bt())));
             }
+            Msg::Tick(i) if self.modules[i].kind == Kind::Memory && self.sys.open == Some(i) => return self.update_sys(popups::SysMsg::MemOpen),
             Msg::Tick(i) if self.modules[i].kind == Kind::Notifications => return self.update_sys(popups::SysMsg::NotesCheck),
             Msg::Tick(i) => {
                 let m = &mut self.modules[i];

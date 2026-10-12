@@ -59,6 +59,7 @@ pub struct Sys {
     bright_pending: Option<u32>,
     /// HeroNotify's history and do-not-disturb.
     pub notes: crate::notes::Notes,
+    pub mem: Vec<(String, u64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +99,8 @@ pub enum SysMsg {
     BrightnessDone(Result<(), String>),
     /// The heartbeat: has the history or do-not-disturb changed?
     NotesCheck,
+    MemOpen,
+    Mem(Vec<(String, u64)>),
     /// Do-not-disturb (on now, on by hand); None without HeroNotify.
     NotesDnd(Option<(bool, bool)>),
     SetDnd(bool),
@@ -113,7 +116,7 @@ fn task(f: impl FnOnce() -> SysMsg + Send + 'static) -> Task<Msg> {
 }
 
 pub fn has_popup(kind: Kind) -> bool {
-    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock | Kind::Battery | Kind::Notifications)
+    matches!(kind, Kind::Volume | Kind::Network | Kind::Bluetooth | Kind::Clock | Kind::Battery | Kind::Notifications | Kind::Memory)
 }
 
 /// The command behind "Advanced...": the module's on-click, else the
@@ -158,6 +161,7 @@ impl Bar {
                 s.cal_offset = 0;
                 return match self.modules[i].kind {
                     Kind::Clock => Task::none(),
+                    Kind::Memory => task(|| SysMsg::Mem(crate::memtop::top(MEM_ROWS))),
                     Kind::Battery => {
                         self.modules[i].refresh();
                         task(|| SysMsg::Brightness(system::brightness()))
@@ -385,6 +389,8 @@ impl Bar {
                 }
             }
             SysMsg::CalShift(n) => s.cal_offset = if n == 0 { 0 } else { s.cal_offset + n },
+            SysMsg::MemOpen => return task(|| SysMsg::Mem(crate::memtop::top(MEM_ROWS))),
+            SysMsg::Mem(v) => s.mem = v,
             SysMsg::NotesCheck => {
                 if s.notes.reload() {
                     self.show_notes();
@@ -1125,4 +1131,31 @@ pub fn notes_size(b: &Bar) -> (i32, i32) {
     }
     h += 22 + 6 + 34 + 12;
     (WIDTH + 30, h)
+}
+
+const MEM_ROWS: usize = 10;
+
+/// The programs using the most memory.
+pub fn mem_view() -> Element<Bar, Msg> {
+    column(vec![
+        heading("Memory").fixed(32),
+        list(
+            |b: &Bar| b.sys.mem.len(),
+            |k| {
+                row(vec![
+                    text(move |b: &Bar| b.sys.mem.get(k).map(|m| m.0.clone()).unwrap_or_default()),
+                    text(move |b: &Bar| b.sys.mem.get(k).map(|m| crate::memtop::size(m.1)).unwrap_or_default()).fixed(90),
+                ])
+                .fixed(24)
+            },
+        ),
+        note(|b: &Bar| if b.sys.mem.is_empty() { "Looking...".into() } else { "A program's processes count as one.".into() }).fixed(22),
+    ])
+    .padding(12)
+    .spacing(4)
+}
+
+pub fn mem_size(b: &Bar) -> (i32, i32) {
+    let rows = b.sys.mem.len().max(1) as i32;
+    (WIDTH, 12 + 32 + 4 + rows * 24 + (rows - 1) * 4 + 4 + 22 + 12)
 }
